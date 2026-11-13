@@ -48,7 +48,9 @@ async function withDbRetry(fn, { label, log: logger } = {}) {
 const MAIL_DISPLAY_NAMES = {
   PAYIN: 'Payins',
   PAYOUT: 'Payout',
-  DOMESTIC_SETTLEMENT: 'Domestic Settlement'
+  DOMESTIC_SETTLEMENT: 'Domestic Settlement',
+  DEPOSIT: 'Deposit',
+  WITHDRAW: 'Withdraw'
 };
 
 /**

@@ -1,0 +1,14 @@
+entity MOBI_DB_PO_MAIL_LOG {
+  key PO_NUMBER         : String(20);
+  key COMPANY_CODE      : String(4);
+      DOCUMENT_TYPE     : String(10);
+      MAIL_STATUS       : String(20);   // SENT | AUTO_APPROVED | NO_APPROVER | NO_RULE | FAILED
+      RECIPIENTS        : String(1000);
+      RULE_ID           : String(20);
+      APPROVAL_LEVEL    : Integer;
+      MESSAGE_ID        : String(200);
+      ERROR_MESSAGE     : String(500);
+      RUN_ID            : String(36);
+      CREATED_BY        : String(100);
+      CREATED_TIMESTAMP : Timestamp;
+}

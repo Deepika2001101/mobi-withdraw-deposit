@@ -25,9 +25,16 @@ class TransactionRepository {
 
     const where = {
       STATUS_CODE: { in: retryableStatuses },
-      PAYMENT_TYPE: { in: scenario.paymentTypeAliases },
-      PAYMENT_SUB_TYPE: { in: scenario.paymentSubTypeAliases }
+      PAYMENT_TYPE: { in: scenario.paymentTypeAliases }
     };
+
+    // Deposit / Withdraw sub types arrive with inconsistent case/space/underscore
+    // spellings that a SQL IN(...) list cannot enumerate exhaustively. For these
+    // scenarios the sub-type filter is applied in JS via the shared catalog
+    // normalizer (case/space/hyphen/underscore/slash insensitive + aliases).
+    if (!scenario.subTypeMatchNormalized) {
+      where.PAYMENT_SUB_TYPE = { in: scenario.paymentSubTypeAliases };
+    }
 
     if (companyCode) {
       where.COMPANY_CODE = String(companyCode).trim();
@@ -38,9 +45,12 @@ class TransactionRepository {
     const rows = await db.run(SELECT.from(EntityNames.TRANSACTION).where(where));
 
     const requestedDate = DateUtil.dbDate(postingDate);
+    const PaymentCatalog = require('../../shared/payment/PaymentCatalog');
 
     return (rows || [])
       .map((r) => this._normalizeRow(r))
+      .filter((r) => !scenario.subTypeMatchNormalized
+        || Boolean(PaymentCatalog.normalizeSubType(r.PAYMENT_TYPE, r.PAYMENT_SUB_TYPE)))
       .filter((r) => this._matchesPostingDateOrRetry(r, requestedDate, alwaysRetry))
       .map((r) => this._withPaymentCodes(r))
       .sort((a, b) => this._sortKey(a).localeCompare(this._sortKey(b)));
@@ -68,12 +78,12 @@ class TransactionRepository {
     };
   }
 
-  async markPostingPending(records, consolRefId, changedBy) {
+  async markPostingPending(records, consolRefId, changedBy, tx = null) {
     if (!records?.length) return 0;
     return this._updateTransactionGroups(records, {
       STATUS_CODE: Constants.CONSOL_STATUS.POSTING_PENDING,
       CONSOL_REF_ID: consolRefId
-    }, changedBy);
+    }, changedBy, tx);
   }
 
   async markRecoverableError(records, consolStatusOrOpts, changedBy) {
@@ -120,8 +130,8 @@ class TransactionRepository {
     return 1;
   }
 
-  async _updateTransactionGroups(records, payload, changedBy) {
-    const db = await cds.connect.to('db');
+  async _updateTransactionGroups(records, payload, changedBy, tx = null) {
+    const db = tx || await cds.connect.to('db');
     const now = DateUtil.nowTimestamp();
 
     const groups = new Map();

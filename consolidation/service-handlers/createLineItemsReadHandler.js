@@ -60,7 +60,29 @@ const FIELDS_BY_SCENARIO = Object.freeze({
   'CREATED_TIMESTAMP',
   'CHANGED_BY',
   'CHANGED_TIMESTAMP'
-]
+],
+  // Deposit / Withdraw: two-line documents on TRANSACTION_AMOUNT, host-independent.
+  // Both source references are exposed separately (no combined ASSIGNMENT field).
+  DEPOSIT: [
+    'CONSOL_REF_ID', 'DOC_REF_ITEM', 'SAP_REF_DOCUMENT', 'HOST_REFERENCE_ID',
+    'MERCHANT_REFERENCE_ID', 'COMPANY_CODE',
+    'MOBI_PORTAL_CODE', 'PAYMENT_TYPE', 'PAYMENT_SUB_TYPE', 'MERCHANT_ID',
+    'SAP_SUPPLIER_NUMBER', 'SAP_CUSTOMER_NUMBER', 'POSTING_DATE', 'DOCUMENT_DATE',
+    'BASELINE_DATE', 'HOST_NAME', 'CURRENCY', 'TRANSACTION_AMOUNT', 'GL_ACCOUNT',
+    'DEBIT_CREDIT_INDICATOR', 'COST_CENTER', 'PROFIT_CENTER', 'DOCUMENT_TYPE',
+    'STATUS_CODE', 'POST_DATE', 'HTTP_STATUS', 'RETRY_COUNT',
+    'CREATED_BY', 'CREATED_TIMESTAMP', 'CHANGED_BY', 'CHANGED_TIMESTAMP'
+  ],
+  WITHDRAW: [
+    'CONSOL_REF_ID', 'DOC_REF_ITEM', 'SAP_REF_DOCUMENT', 'HOST_REFERENCE_ID',
+    'MERCHANT_REFERENCE_ID', 'COMPANY_CODE',
+    'MOBI_PORTAL_CODE', 'PAYMENT_TYPE', 'PAYMENT_SUB_TYPE', 'MERCHANT_ID',
+    'SAP_SUPPLIER_NUMBER', 'SAP_CUSTOMER_NUMBER', 'POSTING_DATE', 'DOCUMENT_DATE',
+    'BASELINE_DATE', 'HOST_NAME', 'CURRENCY', 'TRANSACTION_AMOUNT', 'GL_ACCOUNT',
+    'DEBIT_CREDIT_INDICATOR', 'COST_CENTER', 'PROFIT_CENTER', 'DOCUMENT_TYPE',
+    'STATUS_CODE', 'POST_DATE', 'HTTP_STATUS', 'RETRY_COUNT',
+    'CREATED_BY', 'CREATED_TIMESTAMP', 'CHANGED_BY', 'CHANGED_TIMESTAMP'
+  ]
 });
 
 const SC_POSTED = Constants.POSTING_STATUS.POSTED;
@@ -171,6 +193,9 @@ function scenarioWhere(scenarioCode, scenario) {
       'and',
       { ref: ['PAYMENT_SUB_TYPE'] }, '=', { val: 'DOMESTIC SETTLEMENT' }
     );
+  } else if (scenarioCode === 'DEPOSIT' || scenarioCode === 'WITHDRAW') {
+    // Builder writes the canonical output payment type on every line item.
+    clauses.push({ ref: ['PAYMENT_TYPE'] }, '=', { val: scenarioCode });
   }
 
   const companies = scenario?.allowedCompanyCodes || [];

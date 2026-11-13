@@ -1,5 +1,6 @@
 'use strict';
 
+const cds = require('@sap/cds');
 const ScenarioConfig = require('../config/ScenarioConfig');
 const BuilderRegistry = require('../builders');
 const MasterRepository = require('../repositories/MasterRepository');
@@ -193,7 +194,7 @@ class ConsolidationService {
             );
 
             await this.auditRepository.insertTransactionErrors({
-              runId, scenarioCode: scenario.code, records: recordsToConsolidate,
+              auditId: runAudit.AUDIT_ID, scenarioCode: scenario.code, records: recordsToConsolidate,
               errorCodeByTransaction: this._constantCodeMap(
                 recordsToConsolidate, Constants.ERROR_CODES.CONSOLIDATION_BUILD_FAILED
               ),
@@ -268,14 +269,15 @@ class ConsolidationService {
       }
 
       if (options.dryRun) {
+        const previewLineItems = documents.reduce((t, d) => t + (d.lineItems?.length || 0), 0);
         return this._result({
-          scenario, options, records, documents, transactionsUpdated: 0,
+          scenario, options, records, documents: [], transactionsUpdated: 0,
           errorRecords,
           glAccountMissing: glIssues.size,
           bpMasterMissing: bpIssues.size,
           errorRecordsUpdated: 0, runId,
           consolidationErrorFile: null,
-          message: 'Dry run completed. No database changes were written.'
+          message: `Dry run completed. ${documents.length} header(s) / ${previewLineItems} line item(s) would be created. No database changes were written.`
         });
       }
 
@@ -284,23 +286,54 @@ class ConsolidationService {
       // partial journal entry now and a second one later once the missing GL/BP
       // is configured. The valid records simply stay pending and are retried
       // on the next run.
+      //
+      // Persistence is one explicit CAP transaction: header + line items +
+      // source-transaction status + document-success audit commit together, or
+      // roll back together. `persistedDocuments` (not the built documents) drives
+      // the reported created counts so a blocked run never looks like an insert.
+      let persistedDocuments = [];
+      let insertedHeaders = 0;
+      let insertedLineItems = 0;
+
       if (documents.length && !errorRecords.length) {
-        await this.consolidationRepository.insertDocuments(documents, runAudit?.AUDIT_ID || null);
-        let transactionsUpdated = 0;
-        for (const doc of documents) {
-          transactionsUpdated += await this.transactionRepository.markPostingPending(
-            doc.sourceTransactions, doc.header.CONSOL_REF_ID, options.requestedBy
+        const db = await cds.connect.to('db');
+        await db.tx(async (tx) => {
+          const inserted = await this.consolidationRepository.insertDocuments(
+            documents, runAudit?.AUDIT_ID || null, tx
           );
-        }
-        await this.auditRepository.insertDocumentSuccesses({
-          runId, scenarioCode: scenario.code, documents, processStartAt, changedBy: options.requestedBy
+          insertedHeaders = inserted.headersInserted;
+          insertedLineItems = inserted.lineItemsInserted;
+
+          for (const doc of documents) {
+            await this.transactionRepository.markPostingPending(
+              doc.sourceTransactions, doc.header.CONSOL_REF_ID, options.requestedBy, tx
+            );
+          }
+
+          await this.auditRepository.insertDocumentSuccesses({
+            auditId: runAudit?.AUDIT_ID || null,
+            scenarioCode: scenario.code,
+            documents,
+            changedBy: options.requestedBy,
+            tx
+          });
         });
+        persistedDocuments = documents;
+        console.log(
+          `[Consolidation] ${scenario.code}: inserted ${insertedHeaders} header(s) and ` +
+          `${insertedLineItems} line item(s) in one transaction.`
+        );
+      } else if (documents.length && errorRecords.length) {
+        console.warn(
+          `[Consolidation] ${scenario.code}: ${documents.length} document(s) built but ` +
+          `NOT inserted — ${errorRecords.length} record(s) have GL/BP/imbalance errors (all-or-nothing).`
+        );
       }
 
       // Clean run: overwrite any previous consolidation error report with an
       // "issues fixed" notice (no rename dependency).
       if (!errorRecords.length) {
-        const consolidatedTxns = documents.reduce((t, d) => t + (d.sourceTransactions?.length || 0), 0);
+        const consolidatedTxns = persistedDocuments.reduce((t, d) => t + (d.sourceTransactions?.length || 0), 0);
         const resolved = await this._resolveConsolidationErrorReport({
           postingDate: options.postingDate,
           consolidatedCount: consolidatedTxns,
@@ -310,7 +343,7 @@ class ConsolidationService {
       }
 
       const skipped = errorRecords.length;
-      const successTxnCount = documents.reduce((t, d) => t + (d.sourceTransactions?.length || 0), 0);
+      const successTxnCount = persistedDocuments.reduce((t, d) => t + (d.sourceTransactions?.length || 0), 0);
       const runStatus = successTxnCount > 0
         ? (skipped > 0 ? 'PARTIAL' : 'SUCCESS')
         : (skipped > 0 ? 'PARTIAL' : 'SUCCESS');
@@ -322,13 +355,14 @@ class ConsolidationService {
           successCount: successTxnCount,
           errorCount: skipped,
           errorCode: skipped ? this._primaryBlockedCode(errorRecords) : null,
-          consolRefIds: documents.map((d) => d.header.CONSOL_REF_ID),
+          consolRefIds: persistedDocuments.map((d) => d.header.CONSOL_REF_ID),
           changedBy: options.requestedBy
         });
       }
 
+      const builtLineItems = documents.reduce((t, d) => t + (d.lineItems?.length || 0), 0);
       return this._result({
-        scenario, options, records, documents, transactionsUpdated: successTxnCount,
+        scenario, options, records, documents: persistedDocuments, transactionsUpdated: successTxnCount,
         errorRecords,
         glAccountMissing: glIssues.size,
         bpMasterMissing: bpIssues.size,
@@ -337,8 +371,8 @@ class ConsolidationService {
         message: skipped
           ? (successTxnCount > 0
               ? `Consolidation completed: ${successTxnCount} consolidated, ${skipped} recoverable errors written to AUDIT${consolidationErrorFile ? ' and ' + consolidationErrorFile.fileName : ''}.`
-              : `Consolidation blocked: ${skipped} record(s) have missing GL/BP configuration. No documents were created (all-or-nothing)${consolidationErrorFile ? '; see ' + consolidationErrorFile.fileName : ''}.`)
-          : 'Consolidation completed successfully'
+              : `Consolidation blocked: ${skipped} record(s) have GL/BP/imbalance errors. ${documents.length} document(s) / ${builtLineItems} line item(s) were built but NOT inserted (all-or-nothing)${consolidationErrorFile ? '; see ' + consolidationErrorFile.fileName : ''}.`)
+          : `Consolidation completed successfully: ${insertedHeaders} header(s), ${insertedLineItems} line item(s) inserted.`
       });
     } catch (error) {
       if (runAudit && !options.dryRun) {

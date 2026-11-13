@@ -15,6 +15,8 @@ const StatusCodeUtil = require('../utils/StatusCodeUtil');
 function errorFileSuffix(scenarioCode) {
   if (scenarioCode === 'PAYIN') return 'Payins';
   if (scenarioCode === 'PAYOUT') return 'Payout';
+  if (scenarioCode === 'DEPOSIT') return 'Deposit';
+  if (scenarioCode === 'WITHDRAWAL') return 'Withdrawal';
   if (scenarioCode === 'DOMESTIC_SETTLEMENT') return 'DomesticSettlement';
   return scenarioCode || 'Consolidation';
 }

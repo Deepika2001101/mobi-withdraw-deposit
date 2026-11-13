@@ -121,7 +121,7 @@ class MailNotificationService {
   /**
    * Category 2: BTP consolidation summary (one mail per run).
    * @param {object} args
-   * @param {string} args.displayName 'Payins' | 'Payout' | 'Domestic Settlement'
+   * @param {string} args.displayName 'Payins' | 'Payout' | 'Domestic Settlement'| 'Deposit'
    * @param {object} args.stats consolidation counters
    * @param {object|null} args.errorFile { folderPath, fileName }
    */
@@ -162,7 +162,7 @@ class MailNotificationService {
 
   /**
    * Category 3: SAP journal-entry reversal synchronization summary.
-   * This follows the same best-effort SMTP pattern as payin, payout and
+   * This follows the same best-effort SMTP pattern as payin, payout, deposit and
    * domestic-settlement consolidation mails.
    */
   async sendReversalSummary({

@@ -19,8 +19,33 @@ module.exports = Object.freeze({
   PAYMENT: {
     PAYIN_TYPE_ALIASES: aliases('PAYIN', 'PAYINS'),
     PAYOUT_TYPE_ALIASES: aliases('PAYOUT', 'PAYOUTS'),
+    DEPOSIT_TYPE_ALIASES: aliases('DEPOSIT', 'DEPOSITS'),
+    WITHDRAW_TYPE_ALIASES: aliases('WITHDRAW', 'WITHDRAWS', 'WITHDRAWAL', 'WITHDRAWALS'),
     PAYIN_SUBTYPE_ALIASES: aliases('PAYIN', 'PAYINS'),
     PAYOUT_SUBTYPE_ALIASES: aliases('NORMAL'),
+   DEPOSIT_SUBTYPE_ALIASES: aliases(
+      'Advance - Weekend/PH Topup',
+      'Balance Adjustment - MDR Mismatch',
+      'Balance Adjustment - Internal',
+      'Canis TopUp',
+      'FIAT FX TopUp',
+      'Local Currency Topup',
+      'Local Topup',
+      'TOPUPFORPAYOUTTODOMESTICMERCHANT',
+      'Self Transfer',
+      'Testing',
+      'Topup for Payout to Domestic Merchant'
+    ),
+    WITHDRAW_SUBTYPE_ALIASES: aliases(
+    'Balance Adjustment - MDR Mismatch',
+    'Balance Adjustment - Internal',
+    'Canis Settlement', 
+    'Fiat Settlement',
+    'Refund',
+    'Testing',
+    'Transfers Between Portals',
+    'Recovery - Weekend/PH Topup'
+),
     DS_SUBTYPE_ALIASES: aliases('DOMESTIC SETTLEMENT', 'DOMESTIC_SETTLEMENT', 'DOMESTICSETTLEMENT', 'DS')
   },
 

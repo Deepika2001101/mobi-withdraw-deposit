@@ -69,7 +69,7 @@ entity MOBI_DB_TRANSACTION {
       TXN_CREATED_TIME      : Time;
       TXN_PAID_TIME         : Time;
       TIME_ZONE             : String(3);
-      PAYMENT_SUB_TYPE      : String(30);
+      PAYMENT_SUB_TYPE      : String(50);
       PAYMENT_METHOD        : String(15);
       HOST_NAME             : String(15);
       TXN_CURRENCY          : String(3);
@@ -138,11 +138,13 @@ entity MOBI_DB_FILEBATCH {
 entity MOBI_DB_CONSOLIDATIONHEADER {
   key CONSOL_REF_ID       : String(50);
       AUDIT_ID            : String(36);
+      HOST_REFERENCE_ID     : String(100);
+      MERCHANT_REFERENCE_ID : String(100);
       SAP_REF_DOCUMENT    : String(20);
       COMPANY_CODE        : String(4);
       MOBI_PORTAL_CODE    : String(2);
       PAYMENT_TYPE        : String(20);
-      PAYMENT_SUB_TYPE    : String(30);
+      PAYMENT_SUB_TYPE    : String(50);
       DOCUMENT_TYPE       : String(2);
       POSTING_DATE        : Date;
       DOCUMENT_DATE       : Date;
@@ -165,10 +167,12 @@ entity MOBI_DB_CONSOLIDATIONLINEITEM {
   key DOC_REF_ITEM           : Integer;
       AUDIT_ID               : String(36);
       SAP_REF_DOCUMENT       : String(20);
+      HOST_REFERENCE_ID     : String(100);
+      MERCHANT_REFERENCE_ID : String(100);
       COMPANY_CODE           : String(4);
       MOBI_PORTAL_CODE       : String(2);
       PAYMENT_TYPE           : String(20);
-      PAYMENT_SUB_TYPE       : String(30);
+      PAYMENT_SUB_TYPE       : String(50);
       MERCHANT_ID            : String(20);
       SAP_SUPPLIER_NUMBER    : String(10);
       SAP_CUSTOMER_NUMBER    : String(10);
@@ -204,7 +208,7 @@ entity MOBI_DB_GLAccounts {
   key GL_Accounts       : String(8);
       COMPANY_CODE      : String(4);
       PAYMENT_TYPE      : String(20);
-      PAYMENT_SUB_TYPE  : String(30);
+      PAYMENT_SUB_TYPE  : String(50);
       HOST_NAME         : String(15);
       TXN_AMOUNT        : String(1);
       HOST_MDR_AMOUNT   : String(1);
@@ -231,7 +235,7 @@ entity MOBI_DB_TRANSACTION_REVERSAL {
       TXN_CREATED_TIME      : Time;
       TXN_PAID_TIME         : Time;
       TIME_ZONE             : String(3);
-      PAYMENT_SUB_TYPE      : String(30);
+      PAYMENT_SUB_TYPE      : String(50);
       PAYMENT_METHOD        : String(15);
       HOST_NAME             : String(15);
       TXN_CURRENCY          : String(3);
@@ -265,10 +269,12 @@ entity MOBI_DB_CONSOLIDATIONHEADER_REVERSAL {
   key CONSOL_REF_ID         : String(50);
       AUDIT_ID              : String(36);
       SAP_REF_DOCUMENT      : String(20);
+      HOST_REFERENCE_ID     : String(100);
+      MERCHANT_REFERENCE_ID : String(100);
       COMPANY_CODE          : String(4);
       MOBI_PORTAL_CODE      : String(2);
       PAYMENT_TYPE          : String(20);
-      PAYMENT_SUB_TYPE      : String(30);
+      PAYMENT_SUB_TYPE      : String(50);
       DOCUMENT_TYPE         : String(2);
       POSTING_DATE          : Date;
       DOCUMENT_DATE         : Date;
@@ -294,10 +300,12 @@ entity MOBI_DB_CONSOLIDATIONLINEITEM_REVERSAL {
   key DOC_REF_ITEM           : Integer;
       AUDIT_ID               : String(36);
       SAP_REF_DOCUMENT       : String(20);
+      HOST_REFERENCE_ID     : String(100);
+      MERCHANT_REFERENCE_ID : String(100);
       COMPANY_CODE           : String(4);
       MOBI_PORTAL_CODE       : String(2);
       PAYMENT_TYPE           : String(20);
-      PAYMENT_SUB_TYPE       : String(30);
+      PAYMENT_SUB_TYPE       : String(50);
       MERCHANT_ID            : String(20);
       SAP_SUPPLIER_NUMBER    : String(10);
       SAP_CUSTOMER_NUMBER    : String(10);
@@ -329,4 +337,15 @@ entity MOBI_DB_CONSOLIDATIONLINEITEM_REVERSAL {
       REVERSAL_DOCUMENT      : String(20);
       REVERSAL_REASON        : String(4);
       REVERSAL_DATE          : Date;
+}
+
+entity MOBI_DB_PO_S4_WORKFLOW {
+  key PO_NUMBER             : String(20);
+  key COMPANY_CODE          : String(4);
+      DOCUMENT_TYPE         : String(10);
+      RULE_ID               : String(20);
+      LAST_COMPLETED_TASKS  : Integer;
+      MAX_LEVEL             : Integer;
+      TRACKING_STATUS       : String(16);  // ACTIVE | COMPLETE
+      UPDATED_AT            : Timestamp;
 }

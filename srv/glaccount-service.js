@@ -1,4 +1,5 @@
 const cds = require("@sap/cds");
+const PaymentCatalog = require("../shared/payment/PaymentCatalog");
 
 module.exports = cds.service.impl(async function () {
 
@@ -48,6 +49,43 @@ console.log("GL Entity:", valuelookup);
 const duplicateRecords = [];
 const invalidHosts = [];
 
+// Deposit / Withdraw are host-independent. Canonicalise the payment type and
+// sub type to the shared catalog (Sheet2) spellings so GL rows match the
+// consolidation lookup regardless of how the user typed them, and store a blank
+// host. Invalid sub types are rejected up-front with a clear message.
+const invalidSubTypes = [];
+for (const row of data) {
+    if (PaymentCatalog.isHostIndependentType(row.PAYMENT_TYPE)) {
+        const v = PaymentCatalog.validate(row.PAYMENT_TYPE, row.PAYMENT_SUB_TYPE);
+        if (!v.valid) {
+            invalidSubTypes.push({
+                COMPANY_CODE: row.COMPANY_CODE,
+                PAYMENT_TYPE: row.PAYMENT_TYPE,
+                PAYMENT_SUB_TYPE: row.PAYMENT_SUB_TYPE
+            });
+            continue;
+        }
+        row.PAYMENT_TYPE = v.type;          // DEPOSIT | WITHDRAW
+        row.PAYMENT_SUB_TYPE = v.subType;   // canonical Sheet2 spelling
+        row.HOST_NAME = "";                 // host-independent -> blank host
+    }
+}
+
+if (invalidSubTypes.length > 0) {
+    req.error({
+        code: 400,
+        message: "Invalid Payment Sub Type(s): " +
+            [...new Set(invalidSubTypes.map((r) => r.PAYMENT_SUB_TYPE))].join(", "),
+        target: JSON.stringify({
+            totalRecords: data.length,
+            validRecords: data.length - invalidSubTypes.length,
+            invalidSubTypes: invalidSubTypes.length,
+            invalidSubTypeData: invalidSubTypes
+        })
+    });
+    return;
+}
+
 for (const row of data) {
 
     const existing = await SELECT.one
@@ -83,15 +121,17 @@ for (const row of data) {
 
     }
 
-    // HOST validation
-    const host = row.HOST_NAME.trim().toUpperCase();
+    // HOST validation — skipped for host-independent Deposit / Withdraw rows.
+    if (!PaymentCatalog.isHostIndependentType(row.PAYMENT_TYPE)) {
+        const host = String(row.HOST_NAME || "").trim().toUpperCase();
 
-    const hostExists = await SELECT.one
-        .from(MOBI_DB_MASTER)
-        .where`UPPER(ID) = ${host}`;
+        const hostExists = await SELECT.one
+            .from(MOBI_DB_MASTER)
+            .where`UPPER(ID) = ${host}`;
 
-    if (!hostExists) {
-        invalidHosts.push(row.HOST_NAME);
+        if (!hostExists) {
+            invalidHosts.push(row.HOST_NAME);
+        }
     }
 }
 

@@ -40,6 +40,8 @@ module.exports = Object.freeze({
     PAYIN: 'SYSTEM_PAYIN',
     PAYOUT: 'SYSTEM_PAYOUT',
     DOMESTIC_SETTLEMENT: 'SYSTEM_DS',
+    DEPOSIT: 'SYSTEM_DEPOSIT',
+    WITHDRAW: 'SYSTEM_WITHDRAW',
     DEFAULT: 'SYSTEM_CONSOLIDATION'
   },
 
@@ -91,7 +93,9 @@ module.exports = Object.freeze({
     PAYIN: 1,
     PAYOUT: 2,
     DOMESTIC_SETTLEMENT: 3,
-    NORMAL: 4
+    NORMAL: 4,
+    DEPOSIT: 5,
+    WITHDRAW: 6
   },
 
   GROUP_MODE: {

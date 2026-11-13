@@ -1,0 +1,13 @@
+entity MOBI_DB_PO_MAIL_APPROVAL {
+  key PO_NUMBER      : String(20);
+  key COMPANY_CODE   : String(4);
+  key APPROVAL_LEVEL : Integer;
+      DECISION       : String(20);    // APPROVED | REJECTED
+      DECIDED_BY     : String(200);
+      DECIDED_AT     : Timestamp;
+      REMARKS        : String(1000);  // approver comment (required for reject)
+      NEXT_LEVEL     : Integer;       // level mailed after an approve (0 = none)
+      NEXT_MAILED_TO : String(1000);
+      MESSAGE_ID     : String(200);
+      RUN_ID         : String(36);
+}

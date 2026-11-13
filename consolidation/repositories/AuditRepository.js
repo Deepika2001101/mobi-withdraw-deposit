@@ -140,7 +140,7 @@ class AuditRepository {
   }
 
   async insertDocumentSuccesses({
-    auditId, scenarioCode, documents, changedBy
+    auditId, scenarioCode, documents, changedBy, tx = null
   }) {
     if (!documents?.length || !auditId) return 0;
 
@@ -165,7 +165,7 @@ class AuditRepository {
       }
     }
 
-    await this._insert(entries);
+    await this._insert(entries, tx);
     return entries.length;
   }
 
@@ -227,10 +227,10 @@ class AuditRepository {
 
   // ---- Internal helpers ----
 
-  async _insert(entries) {
+  async _insert(entries, tx = null) {
     if (!entries?.length) return;
     return this._safe(async () => {
-      const db = await cds.connect.to('db');
+      const db = tx || await cds.connect.to('db');
       for (let i = 0; i < entries.length; i += 200) {
         await db.run(INSERT.into(ENTITY).entries(entries.slice(i, i + 200)));
       }

@@ -47,7 +47,7 @@ class ConsolidationRepository {
    * CONSOLIDATION run id; the source transactions keep their own INGESTION
    * AUDIT_ID (which file loaded them).
    */
-  async insertDocuments(documents, auditId = null) {
+  async insertDocuments(documents, auditId = null, tx = null) {
     if (!documents?.length) return { headersInserted: 0, lineItemsInserted: 0 };
 
     if (!auditId) {
@@ -58,7 +58,10 @@ class ConsolidationRepository {
       );
     }
 
-    const db = await cds.connect.to('db');
+    // When the caller supplies a CAP transaction, both inserts enlist in it so
+    // header + line items commit (or roll back) together with the source
+    // transaction status update and the document-success audit rows.
+    const db = tx || await cds.connect.to('db');
     const headers = documents.map((d) => ({ ...d.header, AUDIT_ID: auditId }));
     const lineItems = documents.flatMap((d) =>
       (d.lineItems || []).map((li) => ({ ...li, AUDIT_ID: auditId }))

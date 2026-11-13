@@ -2,6 +2,7 @@
 
 const Constants = require('../utils/Constants');
 const StatusCodeUtil = require('../utils/StatusCodeUtil');
+const PaymentCatalog = require('../../shared/payment/PaymentCatalog');
 
 const key = (...values) => values.map((value) => String(value || '').trim().toUpperCase()).join('|');
 const isHost = (master) => String(master.TYPE || '').trim().toUpperCase() === 'HOST';
@@ -140,7 +141,9 @@ class ValidationService {
       record.COUNTRY_CODE = merchant.COUNTRY_CODE || '';
     }
 
-    if (!index.hosts.has(hostKey)) {
+    // Deposit / Withdraw are host-independent (host = 'N/A'); skip the host
+    // master-data check for them. Merchant master validation still applies.
+    if (!PaymentCatalog.isHostIndependentType(record.PAYMENT_TYPE) && !index.hosts.has(hostKey)) {
       errors.push({
         code: noMasterCode,
         message: StatusCodeUtil.FRIENDLY.noMasterDataFound(record.HOST_NAME)

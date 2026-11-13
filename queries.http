@@ -1,3 +1,67 @@
+POST http://localhost:4004/odata/v4/po-mail-notification/getPoApprovalRouting
+Content-Type: application/json
+
+########
+POST https://mobiversa-private-limited-mobi-dev-space-mobi-dev-cap-srv.cfapps.us10-001.hana.ondemand.com/odata/v4/po-mail-notification/triggerPoMailNotification
+
+{
+  "purchaseOrder": "5100000248",
+  "force": true,
+  "dryRun": true
+}
+
+#########
+POST http://localhost:4004/odata/v4/po-mail-notification/triggerPoMailNotification
+Content-Type: application/json
+
+{
+  "purchaseOrder": "5100000248",
+  "force": true,
+  "dryRun": f
+}
+#########
+### Send PO 5100000168 email
+POST http://localhost:4004/odata/v4/po-mail-notification/triggerPoMailNotification
+Content-Type: application/json
+
+{
+  "purchaseOrder": "5100000181",
+  "force": true,
+  "dryRun": true
+}
+
+
+
+
+###########
+POST http://localhost:4004/odata/v4/po-mail-notification/triggerPoMailNotification
+Content-Type: application/json
+
+{
+  "purchaseOrder": "5100000181",
+  "companyCode": "5000",
+  "documentType": "ZSER",
+  "dryRun": false
+}
+
+
+###########
+POST http://localhost:4004/odata/v4/po-mail-notification/triggerPoMailNotification
+Content-Type: application/json
+
+{
+  "purchaseOrder": "5100000162"
+}
+
+###########
+POST http://localhost:4004/odata/v4/po-mail-notification/triggerPoMailNotification
+Content-Type: application/json
+
+{
+  "dryRun": true,
+  "lookbackDays": 7
+}
+###########
 POST http://localhost:4004/odata/v4/journal-entry-reversal/syncReversedDocuments
 Content-Type: application/json
 
@@ -108,3 +172,31 @@ Get http://localhost:4004/odata/v4/vl-gl-accounts/uploadExcelData/$metadata
 Content-Type: application/json
   { 
   }
+
+
+### Run Deposit Consolidation
+POST http://localhost:4004/odata/v4/deposit-consolidation/runDepositConsolidation
+Content-Type: application/json
+
+{}
+
+####
+POST http://localhost:4004/odata/v4/deposit-consolidation/runDepositConsolidation
+Content-Type: application/json
+
+
+########
+### Run Withdrawal Consolidation
+POST http://localhost:4004/odata/v4/withdraw-consolidation/runWithdrawConsolidation
+Content-Type: application/json
+
+{}
+
+#########
+### Run Withdrawal Consolidation - Dry Run
+POST http://localhost:4004/odata/v4/withdraw-consolidation/runWithdrawConsolidation
+Content-Type: application/json
+
+{
+ 
+}

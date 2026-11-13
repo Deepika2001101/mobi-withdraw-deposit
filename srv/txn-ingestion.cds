@@ -5,25 +5,25 @@ using { mobi.db as db } from '../db/schema';
 // @requires: ['authenticated-user', 'system-user']
 service IngestiontxnService {
 
-  @readonly
-  @restrict: [
-    { grant: 'READ', to: 'Read' },
-    { grant: 'READ', to: 'OperationsTrigger' }
-  ]
+  // @readonly
+  // @restrict: [
+  //   { grant: 'READ', to: 'Read' },
+  //   { grant: 'READ', to: 'OperationsTrigger' }
+  // ]
   entity Audit as projection on db.MOBI_DB_AUDIT;
 
-  @readonly
-  @restrict: [
-    { grant: 'READ', to: 'Read' },
-    { grant: 'READ', to: 'OperationsTrigger' }
-  ]
+  // @readonly
+  // @restrict: [
+  //   { grant: 'READ', to: 'Read' },
+  //   { grant: 'READ', to: 'OperationsTrigger' }
+  // ]
   entity FileLogs as projection on db.MOBI_DB_FILELOG;
 
-  @readonly
-  @restrict: [
-    { grant: 'READ', to: 'Read' },
-    { grant: 'READ', to: 'OperationsTrigger' }
-  ]
+  // @readonly
+  // @restrict: [
+  //   { grant: 'READ', to: 'Read' },
+  //   { grant: 'READ', to: 'OperationsTrigger' }
+  // ]
   entity FileBatches as projection on db.MOBI_DB_FILEBATCH;
 
   function getStatus() returns String;

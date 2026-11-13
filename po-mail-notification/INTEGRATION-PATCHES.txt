@@ -1,0 +1,236 @@
+════════════════════════════════════════════════════════════════════════════
+ PO MAIL NOTIFICATION — INTEGRATION PATCHES
+════════════════════════════════════════════════════════════════════════════
+
+Everything in po-mail-notification/ is drop-in: copy the folder and the two
+srv/ files and it works. This document lists the ONLY edits needed outside the
+folder. Each one is marked REQUIRED or OPTIONAL.
+
+Good news first: your mta.yaml already binds both destinations the feature uses.
+
+
+────────────────────────────────────────────────────────────────────────────
+ PATCH 1 — mta.yaml                                     ★ CHECK, probably nothing to do
+────────────────────────────────────────────────────────────────────────────
+
+Your srv module ALREADY requires both destinations:
+
+    requires:
+      - name: mobi_dev_cap-auth
+      - name: mobi_dev_cap-db
+      - name: mobi_job_scheduler
+      - name: sftp-mobi-destination
+      - name: smtp-mobi-destination        ← SMTP_MOBI_PO_DEV must live in THIS instance
+      - name: s4hana-mobi-destination      ← YY1_PO_EMAIL is read through THIS
+
+Both are bound as existing services:
+
+    - name: smtp-mobi-destination
+      type: org.cloudfoundry.existing-service
+      parameters:
+        service-name: smtp-mobi-destination
+
+    - name: s4hana-mobi-destination
+      type: org.cloudfoundry.existing-service
+      parameters:
+        service-name: s4hana-mobi-destination
+
+► ACTION: open the BTP cockpit → subaccount → Connectivity → Destinations and
+  check WHICH destination-service instance holds SMTP_MOBI_PO_DEV.
+
+  CASE A — it is in the instance whose service-name is `smtp-mobi-destination`
+           → NOTHING TO CHANGE. You are done with mta.yaml.
+
+  CASE B — it is in a different instance (e.g. you created a new one for PO)
+           → add these two ADDITIVE blocks (do not edit any existing line):
+
+    (1) under `modules:` → `- name: mobi_dev_cap-srv` → `requires:`, append:
+
+        - name: smtp-mobi-po-destination
+
+    (2) under `resources:`, append:
+
+        # =========================
+        # EXISTING SMTP DESTINATION (PO APPROVAL MAILS)
+        # =========================
+        - name: smtp-mobi-po-destination
+          type: org.cloudfoundry.existing-service
+
+          parameters:
+            service-name: <the real service-name of that instance>
+
+► ALSO CHECK the S4HANA_MOBI destination's URL property:
+
+        URL: https://my436974-api.s4hana.cloud.sap
+
+  The code takes the host from the destination, never from source, so DEV /
+  QAS / PROD only differ in the destination. If S4HANA_MOBI points at another
+  host, either fix the destination or override with PO_MAIL_ENTITY_PATH +
+  a per-landscape destination.
+
+
+────────────────────────────────────────────────────────────────────────────
+ PATCH 2 — db/schema.cds                                OPTIONAL (recommended)
+────────────────────────────────────────────────────────────────────────────
+
+Makes "one PO = exactly one mail" survive app restarts and multiple instances.
+Without it the feature still works, using the creation-date watermark plus an
+in-memory guard, and logs a warning on every run.
+
+► APPEND to the END of db/schema.cds (the file already declares
+  `namespace mobi.db;` at the top — do NOT repeat it):
+
+    entity MOBI_DB_PO_MAIL_LOG {
+      key PO_NUMBER         : String(20);
+      key COMPANY_CODE      : String(4);
+          DOCUMENT_TYPE     : String(10);
+          MAIL_STATUS       : String(20);
+          RECIPIENTS        : String(1000);
+          RULE_ID           : String(20);
+          APPROVAL_LEVEL    : Integer;
+          MESSAGE_ID        : String(200);
+          ERROR_MESSAGE     : String(500);
+          RUN_ID            : String(36);
+          CREATED_BY        : String(100);
+          CREATED_TIMESTAMP : Timestamp;
+    }
+
+► Then redeploy the DB module so HANA gets the table:
+
+    npm run build      (rimraf resources mta_archives && mbt build --mtar archive)
+    npm run deploy     (cf deploy mta_archives/archive.mtar --retries 1)
+
+► Verify it switched on — `logMode` must read PERSISTED:
+
+    POST /odata/v4/po-mail-notification/getPoApprovalRouting
+
+  No code change, no configuration: PoMailLogRepository detects the entity on
+  the next run and flips from IN_MEMORY to PERSISTED by itself.
+
+
+────────────────────────────────────────────────────────────────────────────
+ PATCH 3 — SAP Job Scheduler                            OPTIONAL (this is what makes it automatic)
+────────────────────────────────────────────────────────────────────────────
+
+Without this, the mail only goes out when somebody POSTs the action. To get
+"PO created → approvers are mailed" with no human involved, schedule the action.
+
+Your `mobi_job_scheduler` binding (service-name `mobi_job_dev`) is already in
+mta.yaml and already used by the journal-entry reversal job, so no MTA change
+is needed — only a new job in the Job Scheduler dashboard.
+
+  Job name        PO_MAIL_NOTIFICATION
+  Action          POST
+  URL               https://<your-srv-route>/odata/v4/po-mail-notification/triggerPoMailNotification
+  Request body    {}
+  Schedule        every 5–15 minutes   (cron: */10 * * * *)
+  Authentication  OAuth2 (Jobs scope)  — same as the reversal job
+
+  The service keeps a watermark, so each run only picks up POs created since the
+  previous run. Running it more often is safe; it never double-mails.
+
+  If the job runs as a technical user, make sure that identity holds the `Jobs`
+  scope (xs-security.json already defines `$XSAPPNAME.Jobs` and grants it to
+  `mobi_job_dev`). If you later add `@requires` to the action, use:
+
+      @requires: ['OperationsTrigger', 'Jobs']
+
+  exactly like journal-entry-reversal.cds.
+
+
+────────────────────────────────────────────────────────────────────────────
+ PATCH 4 — logo                                         REQUIRED for the "Logo" field
+────────────────────────────────────────────────────────────────────────────
+
+  Add file:   po-mail-notification/resources/mobi-logo.png     (or .jpg / .jpeg)
+  Delete:     po-mail-notification/resources/PUT-YOUR-LOGO-HERE.txt
+
+  Keep it under ~100 KB — the bytes travel inside every mail.
+  Different name?   PO_MAIL_LOGO_FILE=<basename without extension>
+  Different width?  PO_MAIL_LOGO_WIDTH=<pixels>       (default 160)
+
+  Because it is deployed as part of the module, make sure your build does not
+  exclude it. `builder: npm-ci` copies the whole module directory, so nothing
+  extra is needed — but if you add a `.npmignore` or `build-parameters`
+  excludes later, keep `po-mail-notification/resources/**` in the artifact.
+
+
+────────────────────────────────────────────────────────────────────────────
+ WHAT YOU MUST *NOT* TOUCH
+────────────────────────────────────────────────────────────────────────────
+
+  package.json          no new dependency — nodemailer, @sap-cloud-sdk/connectivity
+                        and uuid are all already in your package.json
+  shared/mail/**        untouched; this feature has its own sender and template
+  srv/*.cds, srv/*.js   untouched; only the two NEW po-mail-notification files
+  db/schema.cds         untouched unless you choose Patch 2
+  mta.yaml              untouched unless Patch 1 Case B applies
+  app/**, approuter/**  untouched
+
+
+────────────────────────────────────────────────────────────────────────────
+ SECURITY — do this before go-live
+────────────────────────────────────────────────────────────────────────────
+
+The destination currently stores the mailbox password in PLAIN TEXT as the
+additional property `mail.smtp.password`, and that password has been shared in
+chat. Recommended:
+
+  1. Rotate the mailbox password for sappostingnotification@mobi.xyz
+  2. Put the new password ONLY in the destination's main `Password` field
+  3. DELETE the additional property `mail.smtp.password`
+
+PoSmtpDestination already falls back to destination.password / the main
+Password property, so nothing breaks. The reason the plain-text property exists
+at all is that Type=MAIL + BasicAuthentication does not reliably expose the
+main Password field to every Cloud SDK version — after rotating, verify with:
+
+  POST /odata/v4/po-mail-notification/getPoApprovalRouting
+
+and confirm smtpUser / mailFrom are populated, then send one dryRun=false test
+mail to yourself.
+
+Never commit the password to git.
+
+────────────────────────────────────────────────────────────────────────────
+PATCH 5 - OPTIONAL - switch on the in-app auto run on BTP (zero file edits)
+────────────────────────────────────────────────────────────────────────────
+If you do NOT want a Job Scheduler job, the app can trigger itself on a
+timer (services/PoAutoScheduler.js, off by default):
+
+  cf set-env mobi-cap-srv-<space> PO_MAIL_AUTO_RUN true
+  cf restage mobi-cap-srv-<space>
+
+Equivalent mta.yaml variant (module mobi_dev_cap-srv, properties:):
+
+  PO_MAIL_AUTO_RUN: 'true'
+
+Optional companions: PO_MAIL_AUTO_INTERVAL_MIN (default 5),
+PO_MAIL_AUTO_STARTUP_DELAY_SEC (default 30), PO_MAIL_AUTO_DRY_RUN (default false).
+
+Do not enable this AND a Job Scheduler job at the same time. With more than
+one app instance, deploy the PERSISTED mail log (PATCH 2) first.
+
+────────────────────────────────────────────────────────────────────────────
+PATCH 6 - LEGACY - persisted CAP email decisions
+────────────────────────────────────────────────────────────────────────────
+The S/4HANA My Inbox approval mode does not use CAP email decisions. Do not
+apply the old po-approval-entity patch for this flow unless another feature
+still uses CAP-side email decisions.
+
+────────────────────────────────────────────────────────────────────────────
+PATCH 7 - LEGACY - public URL + fixed secret for mail decision buttons
+────────────────────────────────────────────────────────────────────────────
+The S/4HANA My Inbox notification mode does not generate approval buttons or
+signed decision links. PO_MAIL_PUBLIC_URL and PO_MAIL_TOKEN_SECRET are not
+required for this flow.
+
+────────────────────────────────────────────────────────────────────────────
+PATCH 8 - REQUIRED - persistent S/4 workflow progress checkpoint
+────────────────────────────────────────────────────────────────────────────
+Next-level notifications depend on remembering each PO's last processed
+NmbrOfCmpltdWrkflwDialogTasks value across app restarts. Append the entity from
+po-mail-notification/db/po-s4-workflow-entity.cds.txt to db/schema.cds (the
+existing mobi.db namespace is already declared), then redeploy the DB module.
+The poller fails closed until this entity is available; it will not send
+next-level notifications using in-memory state.

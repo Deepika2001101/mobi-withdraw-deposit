@@ -175,6 +175,18 @@ sap.ui.define([
                         var sPaymentSubType = String(oRow["Payment Sub Type"] || "").trim().toUpperCase();
                         var sHost = String(oRow["Host"] || "").trim().toUpperCase();
 
+                        // Normalise payment-type aliases. Deposit / Withdraw are
+                        // host-independent: Host is optional and sub types may
+                        // contain digits, spaces, hyphens and slashes. The server
+                        // (uploadExcelData) validates sub types against the shared
+                        // PaymentCatalog and canonicalises them before storing.
+                        var sNormType = sPaymentType;
+                        if (sNormType === "PAYIN") { sNormType = "PAYINS"; }
+                        else if (sNormType === "PAYOUTS") { sNormType = "PAYOUT"; }
+                        else if (sNormType === "DEPOSITS") { sNormType = "DEPOSIT"; }
+                        else if (sNormType === "WITHDRAWS" || sNormType === "WITHDRAWAL" || sNormType === "WITHDRAWALS") { sNormType = "WITHDRAW"; }
+                        var bHostIndependent = (sNormType === "DEPOSIT" || sNormType === "WITHDRAW");
+
                         // Update the row so the table displays the uppercase values
                         oRow["Payment Type"] = sPaymentType;
                         oRow["Payment Sub Type"] = sPaymentSubType;
@@ -284,7 +296,8 @@ sap.ui.define([
                             bInvalid = true;
                         }
 
-                        if (!sHost) {
+                        // Host is mandatory for Payins/Payout, optional for Deposit/Withdraw.
+                        if (!sHost && !bHostIndependent) {
                             aErrors.push("Row " + iRow + ": Host is mandatory.");
                             bInvalid = true;
                         }
@@ -324,20 +337,21 @@ sap.ui.define([
                             aRowErrors.push("Invalid GL Account");
                         }
 
-                        // Payment Type
+                        // Payment Type — Payins, Payout, Deposit or Withdraw
                         if (sPaymentType &&
-                            sPaymentType !== "PAYINS" &&
-                            sPaymentType !== "PAYOUT") {
+                            ["PAYINS", "PAYOUT", "DEPOSIT", "WITHDRAW"].indexOf(sNormType) === -1) {
 
-                            aErrors.push("Row " + iRow + ": Payment Type must be either Payins or Payout.");
+                            aErrors.push("Row " + iRow + ": Payment Type must be Payins, Payout, Deposit or Withdraw.");
                             bInvalid = true;
-                            // oRow.Status = "Invalid Payment Type";
                             aRowErrors.push("Invalid Payment Type");
                         }
 
-                        // Payment Sub Type - String
-                        if (sPaymentSubType && !/^[A-Za-z ]+$/.test(sPaymentSubType)) {
-                            aErrors.push("Row " + iRow + ": Payment Sub Type must contain only alphabets.");
+                        // Payment Sub Type - characters. Deposit / Withdraw sub types
+                        // include digits, hyphens and slashes (e.g. "Advance - Weekend/PH Topup");
+                        // the exact sub-type name is validated server-side via PaymentCatalog.
+                        var oSubTypePattern = bHostIndependent ? /^[A-Za-z0-9 /_-]+$/ : /^[A-Za-z ]+$/;
+                        if (sPaymentSubType && !oSubTypePattern.test(sPaymentSubType)) {
+                            aErrors.push("Row " + iRow + ": Payment Sub Type contains invalid characters.");
                             bInvalid = true;
                         }
 

@@ -28,6 +28,8 @@ modules:
     parameters:
       buildpack: nodejs_buildpack
       instances: 1
+      memory: 1024M
+      disk-quota: 1024M
       app-name: mobi-cap-srv-${space}
 
     build-parameters:
@@ -61,8 +63,8 @@ modules:
           forwardAuthToken: false
 
     parameters:
-      disk-quota: 512M
-      memory: 512M
+      disk-quota: 1024M
+      memory: 1024M
       app-name: mobi-cap-approuter-${space}
 
 

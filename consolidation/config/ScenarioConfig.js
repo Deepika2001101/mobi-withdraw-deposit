@@ -1,6 +1,7 @@
 'use strict';
 
 const Constants = require('../constants/ConsolidationConstants');
+const PaymentCatalog = require('../../shared/payment/PaymentCatalog');
 
 const RETRYABLE_STATUSES = Constants.PENDING_CONSOL_STATUSES.slice();
 
@@ -24,6 +25,13 @@ const DS_SUBTYPE_ALIASES = aliases(
   'DOMESTIC_SETTLEMENT', 'Domestic_Settlement',
   'DOMESTICSETTLEMENT', 'DomesticSettlement', 'DS'
 );
+
+// Deposit / Withdraw (Book 19.xlsx). Raw spellings accepted in SQL IN clauses
+// come from the shared catalog so ingestion, consolidation and GL lookup agree.
+const DEPOSIT_TYPE_ALIASES = aliases(PaymentCatalog.typeSqlAliases('DEPOSIT'));
+const WITHDRAW_TYPE_ALIASES = aliases(PaymentCatalog.typeSqlAliases('WITHDRAW'));
+const DEPOSIT_SUBTYPE_ALIASES = aliases(PaymentCatalog.subTypeSqlAliases('DEPOSIT'));
+const WITHDRAW_SUBTYPE_ALIASES = aliases(PaymentCatalog.subTypeSqlAliases('WITHDRAW'));
 
 module.exports = Object.freeze({
   PAYIN: {
@@ -159,5 +167,69 @@ module.exports = Object.freeze({
       fallbackAmountField: 'HOST_MDR_AMOUNT'
     }
   ]
-}
+},
+
+  // ---------------------------------------------------------------------------
+  // DEPOSIT (Book 19.xlsx) — one Z4 document per transaction.
+  //   Line 1: GL clearing  DEBIT (S)  transaction_amount, cost center, GL lookup
+  //   Line 2: Merchant AP  CREDIT (H) transaction_amount, SAP supplier number
+  // Host-independent: GL keyed by company + type + sub type (no host).
+  // ---------------------------------------------------------------------------
+  DEPOSIT: {
+    code: 'DEPOSIT',
+    displayName: 'Deposit',
+    systemUser: Constants.SYSTEM_USERS.DEPOSIT,
+    paymentTypeAliases: DEPOSIT_TYPE_ALIASES,
+    paymentSubTypeAliases: DEPOSIT_SUBTYPE_ALIASES,
+    outputPaymentType: 'DEPOSIT',
+    // outputPaymentSubType intentionally omitted -> builder keeps the
+    // transaction's own (canonical) sub type on the header / line items.
+    allowedCompanyCodes: ['2000', '3000'],
+    retryableConsolStatuses: RETRYABLE_STATUSES,
+    groupMode: Constants.GROUP_MODE.PER_TRANSACTION,
+    refToken: 'DEPOSIT',
+    documentType: 'Z4',
+    costCenterByCompany: { '2000': '2018', '3000': '3018' },
+    profitCenterByCompany: { '2000': '2000', '3000': '3000' },
+    postingStatus: Constants.POSTING_STATUS.CONSOLIDATION_PENDING,
+    requireMerchantBusinessPartner: true,
+    requireHostCustomerNumber: false,
+    // GL matching rules for the new host-independent types:
+    glIgnoreHost: true,
+    glSubTypeFromRecord: true,
+    subTypeMatchNormalized: true,
+    requiredGlAccountFields: [
+      { glFlagField: 'TXN_AMOUNT', amountField: 'TXN_AMOUNT' }
+    ]
+  },
+
+  // ---------------------------------------------------------------------------
+  // WITHDRAW (Book 19.xlsx) — one Z3 document per transaction.
+  //   Line 1: Merchant AP  DEBIT (S)  transaction_amount, SAP supplier number
+  //   Line 2: GL clearing  CREDIT (H) transaction_amount, cost center, GL lookup
+  // ---------------------------------------------------------------------------
+  WITHDRAW: {
+    code: 'WITHDRAW',
+    displayName: 'Withdraw',
+    systemUser: Constants.SYSTEM_USERS.WITHDRAW,
+    paymentTypeAliases: WITHDRAW_TYPE_ALIASES,
+    paymentSubTypeAliases: WITHDRAW_SUBTYPE_ALIASES,
+    outputPaymentType: 'WITHDRAW',
+    allowedCompanyCodes: ['2000', '3000'],
+    retryableConsolStatuses: RETRYABLE_STATUSES,
+    groupMode: Constants.GROUP_MODE.PER_TRANSACTION,
+    refToken: 'WITHDRAW',
+    documentType: 'Z3',
+    costCenterByCompany: { '2000': '2017', '3000': '3017' },
+    profitCenterByCompany: { '2000': '2000', '3000': '3000' },
+    postingStatus: Constants.POSTING_STATUS.CONSOLIDATION_PENDING,
+    requireMerchantBusinessPartner: true,
+    requireHostCustomerNumber: false,
+    glIgnoreHost: true,
+    glSubTypeFromRecord: true,
+    subTypeMatchNormalized: true,
+    requiredGlAccountFields: [
+      { glFlagField: 'TXN_AMOUNT', amountField: 'TXN_AMOUNT' }
+    ]
+  }
 });

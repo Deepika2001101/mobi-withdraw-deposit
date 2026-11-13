@@ -1,0 +1,22 @@
+════════════════════════════════════════════════════════════════════════════
+ REQUIRED FOR S/4 WORKFLOW-PROGRESS NOTIFICATIONS
+════════════════════════════════════════════════════════════════════════════
+
+Append this entity to the application's db/schema.cds. The feature does not
+modify db/schema.cds directly. The namespace mobi.db is already declared in
+that file; do not repeat it here.
+
+entity MOBI_DB_PO_S4_WORKFLOW {
+  key PO_NUMBER             : String(20);
+  key COMPANY_CODE          : String(4);
+      DOCUMENT_TYPE         : String(10);
+      RULE_ID               : String(20);
+      LAST_COMPLETED_TASKS  : Integer;
+      MAX_LEVEL             : Integer;
+      TRACKING_STATUS       : String(16);  // ACTIVE | COMPLETE
+      UPDATED_AT            : Timestamp;
+}
+
+Deploy the CAP DB module after adding the entity. Workflow-progress polling
+fails closed (it will not send next-level emails) until the entity is deployed,
+because an in-memory checkpoint cannot prevent duplicates after app restarts.

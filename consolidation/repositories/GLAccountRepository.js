@@ -69,13 +69,16 @@ class GLAccountLookup {
       if (!ACTIVE_STATUSES.has(status)) continue;
 
       const company = NormalizeUtil.text(row.COMPANY_CODE);
-      const paymentTypeCode = NormalizeUtil.paymentCode(row.PAYMENT_TYPE);
-      const paymentSubTypeCode = NormalizeUtil.paymentCode(row.PAYMENT_SUB_TYPE);
-      const host = NormalizeUtil.host(row.HOST_NAME);
+      const typeToken = NormalizeUtil.paymentTypeToken(row.PAYMENT_TYPE);
+      const subTypeToken = NormalizeUtil.paymentSubTypeToken(row.PAYMENT_TYPE, row.PAYMENT_SUB_TYPE);
+      // Host-independent types (Deposit / Withdraw) are maintained without a host.
+      const host = NormalizeUtil.isHostIndependentType(row.PAYMENT_TYPE)
+        ? ''
+        : NormalizeUtil.host(row.HOST_NAME);
 
       for (const field of GL_FLAG_FIELDS) {
         if (NormalizeUtil.upper(row[field]) === 'X') {
-          this._addMapping(this._key(company, paymentTypeCode, paymentSubTypeCode, host, field), glAccount);
+          this._addMapping(this._key(company, typeToken, subTypeToken, host, field), glAccount);
         }
       }
     }
@@ -94,24 +97,40 @@ class GLAccountLookup {
 
   _candidateKeys(record, flagField, scenario) {
     const company = NormalizeUtil.text(record.COMPANY_CODE);
-    const host = NormalizeUtil.host(record.HOST_NAME);
     const field = NormalizeUtil.upper(flagField);
 
-    const ptCodes = this._candidateCodes(record.PAYMENT_TYPE, scenario.paymentTypeAliases);
-    const pstCodes = this._candidateCodes(
-      record.PAYMENT_SUB_TYPE, scenario.glPaymentSubTypeAliases || scenario.paymentSubTypeAliases
+    const typeTokens = this._candidateTokens(
+      record.PAYMENT_TYPE, scenario.paymentTypeAliases,
+      (v) => NormalizeUtil.paymentTypeToken(v)
     );
 
+    // Deposit / Withdraw: each sub type has its own GL, so match ONLY the
+    // record's own (canonical) sub type — never the scenario's full alias list.
+    let subTypeTokens;
+    if (scenario.glSubTypeFromRecord) {
+      const token = NormalizeUtil.paymentSubTypeToken(record.PAYMENT_TYPE, record.PAYMENT_SUB_TYPE);
+      subTypeTokens = token ? [token] : [];
+    } else {
+      subTypeTokens = this._candidateTokens(
+        record.PAYMENT_SUB_TYPE, scenario.glPaymentSubTypeAliases || scenario.paymentSubTypeAliases,
+        (v) => NormalizeUtil.paymentSubTypeToken(record.PAYMENT_TYPE, v)
+      );
+    }
+
+    // Host-independent types are matched without a host.
+    const host = (scenario.glIgnoreHost || NormalizeUtil.isHostIndependentType(record.PAYMENT_TYPE))
+      ? ''
+      : NormalizeUtil.host(record.HOST_NAME);
+
     const keys = [];
-    for (const pt of ptCodes) for (const pst of pstCodes) {
+    for (const pt of typeTokens) for (const pst of subTypeTokens) {
       keys.push(this._key(company, pt, pst, host, field));
     }
     return keys;
   }
 
-  _candidateCodes(primary, aliases = []) {
-    const values = [primary, ...(aliases || [])]
-      .map((v) => NormalizeUtil.paymentCode(v)).filter((c) => c > 0);
+  _candidateTokens(primary, aliases, normalize) {
+    const values = [primary, ...(aliases || [])].map(normalize).filter(Boolean);
     return [...new Set(values)];
   }
 

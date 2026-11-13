@@ -68,9 +68,15 @@
 
                     <Text text="• GL Account must contain exactly 8 digits."/>
 
-                    <Text text="• Payment Type must be either Payins or Payout."/>
+                    <Text text="• Payment Type must be Payins, Payout, Deposit or Withdraw."/>
 
                     <Text text="• Host Name must not exceed 20 characters."/>
+
+                    <Text text="• For Deposit and Withdraw, Host is optional (leave blank). The GL is matched by Company Code + Payment Type + Payment Sub Type only."/>
+
+                    <Text text="• Deposit / Withdraw Payment Sub Type must be a valid catalogued sub type (e.g. Canis TopUp, Advance - Weekend/PH Topup, Canis Settlement, Fiat Settlement, Refund). Matching ignores case, spaces, hyphens and underscores."/>
+
+                    <Text text="• Deposit / Withdraw rows use the Transaction Amount 'X' flag and an 8-digit GL Account."/>
 
                     <Text text="• Only one of the following fields should contain 'X'."/>
 
