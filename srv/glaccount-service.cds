@@ -3,10 +3,10 @@ using { mobi.db as db } from '../db/schema';
 // @requires: 'authenticated-user'
 service VlGlAccounts {
 
-    @restrict: [
-        { grant: 'READ', to: 'Read' },
-        { grant: '*',    to: 'Admin' }
-    ]
+    // @restrict: [
+    //     { grant: 'READ', to: 'Read' },
+    //     { grant: '*',    to: 'Admin' }
+    // ]
     entity valuelookup as projection on db.MOBI_DB_GLAccounts;
 
     @requires: 'Read'

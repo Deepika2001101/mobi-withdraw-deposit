@@ -84,26 +84,18 @@ const TYPE_RAW_ALIASES = Object.freeze({
   ])
 });
 
-// ---------------------------------------------------------------------------
-// Payment SUB TYPES
-// ---------------------------------------------------------------------------
-
-/**
- * Each entry: canonical Sheet2 name + every compact alias seen in the workbook
- * or the portal feeds. `companyCodes` is informational only (see header note).
- */
 const SUB_TYPES = Object.freeze({
   DEPOSIT: Object.freeze([
     { name: 'Advance - Weekend/PH Topup', companyCodes: ['2000', '3000'], aliases: ['ADVANCEWEEKENDPHTOPUP'] },
     { name: 'Balance Adjustment - MDR Mismatch', companyCodes: ['2000', '3000'], aliases: ['BALANCEADJUSTMENTMDRMISMATCH'] },
-    { name: 'Balance Adjustment - Internal', companyCodes: ['3000'], aliases: ['BALANCEADJUSTMENTINTERNAL'] },
+    { name: 'Balance Adjustment - Internal', companyCodes: ['2000', '3000'], aliases: ['BALANCEADJUSTMENTINTERNAL'] },
     { name: 'Canis TopUp', companyCodes: ['2000', '3000'], aliases: ['CANISTOPUP'] },
     { name: 'FIAT FX TopUp', companyCodes: ['2000', '3000'], aliases: ['FIATFXTOPUP', 'FXTOPUP', 'FIATFX'] },
-    { name: 'Local Currency Topup', companyCodes: ['3000'], aliases: ['LOCALCURRENCYTOPUP'] },
-    { name: 'Local Topup', companyCodes: ['2000'], aliases: ['LOCALTOPUP'] },
+    { name: 'Local Currency Topup', companyCodes: ['2000', '3000'], aliases: ['LOCALCURRENCYTOPUP'] },
+    { name: 'Local Topup', companyCodes: ['2000', '3000'], aliases: ['LOCALTOPUP'] },
     {
       name: 'Topup for Payout to Domestic Merchant',
-      companyCodes: ['2000'],
+      companyCodes: ['2000', '3000'],
       aliases: ['TOPUPFORPAYOUTTODOMESTICMERCHANT']
     },
     { name: 'Self Transfer', companyCodes: ['2000', '3000'], aliases: ['SELFTRANSFER'] },
@@ -111,16 +103,15 @@ const SUB_TYPES = Object.freeze({
   ]),
   WITHDRAW: Object.freeze([
     { name: 'Balance Adjustment - MDR Mismatch', companyCodes: ['2000', '3000'], aliases: ['BALANCEADJUSTMENTMDRMISMATCH'] },
-    { name: 'Balance Adjustment - Internal', companyCodes: ['3000'], aliases: ['BALANCEADJUSTMENTINTERNAL'] },
+    { name: 'Balance Adjustment - Internal', companyCodes: ['2000', '3000'], aliases: ['BALANCEADJUSTMENTINTERNAL'] },
     { name: 'Canis Settlement', companyCodes: ['2000', '3000'], aliases: ['CANISSETTLEMENT'] },
-    { name: 'Fiat Settlement', companyCodes: ['2000'], aliases: ['FIATSETTLEMENT'] },
+    { name: 'Fiat Settlement', companyCodes: ['2000', '3000'], aliases: ['FIATSETTLEMENT'] },
     { name: 'Refund', companyCodes: ['2000', '3000'], aliases: ['REFUND', 'REFUNDS'] },
     { name: 'Testing', companyCodes: ['2000', '3000'], aliases: ['TESTING', 'TEST'] },
-    { name: 'Transfers Between Portals', companyCodes: ['3000'], aliases: ['TRANSFERSBETWEENPORTALS'] },
-    { name: 'Recovery - Weekend/PH Topup', companyCodes: ['3000'], aliases: ['RECOVERYWEEKENDPHTOPUP'] },
-    // Present in the sample journal entries (Withdraw / SELFTRANSFER) even
-    // though Sheet2 lists Self Transfer under Deposit only.
-    { name: 'Self Transfer', companyCodes: ['2000', '3000'], aliases: ['SELFTRANSFER'] }
+    { name: 'Transfers Between Portals', companyCodes: ['2000', '3000'], aliases: ['TRANSFERSBETWEENPORTALS'] },
+    { name: 'Recovery - Weekend/PH Topup', companyCodes: ['2000', '3000'], aliases: ['RECOVERYWEEKENDPHTOPUP'] },
+    { name: 'Self Transfer', companyCodes: ['2000', '3000'], aliases: ['SELFTRANSFER'] },
+    { name: 'Domestic Settlement', companyCodes: ['2000', '3000'], aliases: ['DOMESTICSETTLEMENT'] }
   ])
 });
 

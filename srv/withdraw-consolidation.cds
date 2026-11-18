@@ -3,6 +3,8 @@ using { mobi.db as db } from '../db/schema';
 // Withdraw consolidation (Book 19.xlsx). One Z3 document per transaction:
 //   Dr merchant AP (SAP supplier) / Cr GL clearing (cost center).
 // Host-independent: GL keyed by company + type + sub type.
+// Mirrors the access model used by the existing Payin/Payout/settlement services.
+// @requires: ['authenticated-user', 'system-user']
 service WithdrawConsolidationService {
 
   // @cds.persistence.skip
@@ -47,6 +49,15 @@ service WithdrawConsolidationService {
         CHANGED_TIMESTAMP      : Timestamp;
   }
 
+  // @readonly
+  // @restrict: [
+  //   { grant: 'READ', to: 'Read' },
+  //   { grant: 'READ', to: 'OperationsTrigger' },
+  //   { grant: 'READ', to: 'PostingCallback' }
+  // ]
+  entity Headers as projection on db.MOBI_DB_CONSOLIDATIONHEADER
+    where PAYMENT_TYPE = 'WITHDRAW';
+
   type WithdrawConsolidationRunResult {
     scenario               : String(40);
     dryRun                 : Boolean;
@@ -63,6 +74,7 @@ service WithdrawConsolidationService {
     message                : String(500);
   }
 
+  // @requires: ['OperationsTrigger', 'Jobs']
   action runWithdrawConsolidation(
     companyCode  : String(4),
     postingDate  : Date,
@@ -71,7 +83,7 @@ service WithdrawConsolidationService {
     dryRun       : Boolean
   ) returns WithdrawConsolidationRunResult;
 
-  @requires: 'PostingCallback'
+  // @requires: 'PostingCallback'
   action updateBatchPostingResults(items : array of {
     consolRefId    : String(50);
     sapRefDocument : String(20);

@@ -43,6 +43,8 @@ module.exports = Object.freeze({
     'Fiat Settlement',
     'Refund',
     'Testing',
+    'Self Transfer',
+    'Domestic Settlement',
     'Transfers Between Portals',
     'Recovery - Weekend/PH Topup'
 ),

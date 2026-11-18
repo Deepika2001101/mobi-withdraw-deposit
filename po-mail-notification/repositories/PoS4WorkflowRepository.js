@@ -1,4 +1,14 @@
 'use strict';
+
+/**
+ * Persistent checkpoint for S/4HANA workflow progress polling.
+ *
+ * This repository deliberately has no in-memory fallback: losing the last
+ * completed-task count on restart could cause duplicate next-level emails.
+ * Add the entity from db/po-s4-workflow-entity.cds.txt to the application's
+ * db/schema.cds before enabling this workflow notification feature.
+ */
+
 const cds = require('@sap/cds');
 const Constants = require('../constants/PoConstants');
 
@@ -8,6 +18,9 @@ class PoS4WorkflowRepository {
   }
 
   async _db() {
+    // Reuse CAP's already-connected DB service. Opening another connection
+    // here can return a disconnected service in hybrid runs or after a long
+    // scheduler tick.
     const db = cds.db || cds.services?.db;
     if (!db) throw new Error('No CAP database service is bound.');
 
@@ -37,13 +50,18 @@ class PoS4WorkflowRepository {
       COMPANY_CODE: companyCode
     }));
   }
+
+  /** Create a starting checkpoint once; never reset an existing PO's progress. */
   async initialize({ poNumber, companyCode, documentType, ruleId, completedTasks, maxLevel }) {
     const existing = await this.get(poNumber, companyCode);
     if (existing) return existing;
 
     const db = await this._db();
     const { INSERT } = cds.ql;
-    const status = maxLevel >= 2 ? 'ACTIVE' : 'COMPLETE';
+    // One-level routes must also start ACTIVE: the poll observes the single
+    // approver's final approval/rejection and sends the completion/rejection
+    // notice; the row leaves the ACTIVE set when advance() marks it terminal.
+    const status = maxLevel >= 1 ? 'ACTIVE' : 'COMPLETE';
     const row = {
       PO_NUMBER: String(poNumber).slice(0, 20),
       COMPANY_CODE: String(companyCode).slice(0, 4),
@@ -57,6 +75,8 @@ class PoS4WorkflowRepository {
     await db.run(INSERT.into(this.entity).entries(row));
     return row;
   }
+
+  /** Save the observed S/4 task count after the matching notification succeeds. */
   async advance({ poNumber, companyCode, completedTasks, trackingStatus = 'ACTIVE' }) {
     const db = await this._db();
     const { UPDATE } = cds.ql;

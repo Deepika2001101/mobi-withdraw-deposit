@@ -114,7 +114,7 @@ class ConsolidationErrorReporter {
       '',
       'Only invalid records are listed below in a human-readable format.',
       '',
-      'S.NO | AUDIT_ID | ROW_NO | MOBI_REFERENCE_ID | PAYMENT_TYPE | COMPANY_CODE | MOBI_PORTAL_CODE | ERROR_CODE | ERROR_DETAIL'
+      'S.NO | AUDIT_ID | ROW_NO | MOBI_REFERENCE_ID | PAYMENT_TYPE | PAYMENT_SUB_TYPE | COMPANY_CODE | MOBI_PORTAL_CODE | HOST_NAME | ERROR_CODE | ERROR_DETAIL'
     ];
 
     records.forEach((entry, index) => {
@@ -125,8 +125,10 @@ class ConsolidationErrorReporter {
         '',
         NormalizeUtil.text(record.MOBI_REFERENCE_ID),
         NormalizeUtil.text(record.PAYMENT_TYPE),
+        NormalizeUtil.text(record.PAYMENT_SUB_TYPE),
         NormalizeUtil.text(record.COMPANY_CODE),
         NormalizeUtil.text(record.MOBI_PORTAL_CODE),
+        NormalizeUtil.text(record.HOST_NAME),
         StatusCodeUtil.toText(entry.statusCode),
         sanitize(entry.message)
       ].join(' | '));

@@ -47,6 +47,8 @@ console.log("GL Entity:", valuelookup);
  const { valuelookup } = cds.entities("VlGlAccounts");
 
 const duplicateRecords = [];
+const conflictingHostIndependentMappings = [];
+const hostIndependentMappings = new Map();
 const invalidHosts = [];
 
 // Deposit / Withdraw are host-independent. Canonicalise the payment type and
@@ -82,6 +84,38 @@ if (invalidSubTypes.length > 0) {
             invalidSubTypes: invalidSubTypes.length,
             invalidSubTypeData: invalidSubTypes
         })
+    });
+    return;
+}
+
+// Host-independent payment mappings must resolve to one GL account per
+// company + canonical type + canonical sub type + amount flag. Reject a batch
+// that would otherwise create conflicting active rows and later block posting.
+for (const row of data) {
+    if (!PaymentCatalog.isHostIndependentType(row.PAYMENT_TYPE)) continue;
+    for (const field of ["TXN_AMOUNT", "HOST_MDR_AMOUNT", "HOST_FEE_PAYABLE", "MOBI_MDR_AMOUNT", "MDR_REVENUE"]) {
+        if (String(row[field] || "").trim().toUpperCase() !== "X") continue;
+        const key = [row.COMPANY_CODE, row.PAYMENT_TYPE, row.PAYMENT_SUB_TYPE, field].join("|");
+        const previous = hostIndependentMappings.get(key);
+        if (previous && previous.GL_Accounts !== row.GL_Accounts) {
+            conflictingHostIndependentMappings.push({
+                COMPANY_CODE: row.COMPANY_CODE,
+                PAYMENT_TYPE: row.PAYMENT_TYPE,
+                PAYMENT_SUB_TYPE: row.PAYMENT_SUB_TYPE,
+                FIELD: field,
+                GL_ACCOUNTS: [...new Set([previous.GL_Accounts, row.GL_Accounts])]
+            });
+        } else if (!previous) {
+            hostIndependentMappings.set(key, row);
+        }
+    }
+}
+
+if (conflictingHostIndependentMappings.length > 0) {
+    req.error({
+        code: 400,
+        message: "Conflicting GL mapping(s): Deposit/Withdraw require one active GL account per company, payment type, payment sub type and amount flag.",
+        target: JSON.stringify({ conflictingMappings: conflictingHostIndependentMappings })
     });
     return;
 }
@@ -173,41 +207,37 @@ if (invalidHosts.length > 0) {
 }
             for (const row of data) {
 
+                // For Deposit/Withdraw, older GL rows may still contain a host
+                // value from the pre-extension setup. A new canonical, blank-host
+                // mapping supersedes those rows because these types are
+                // host-independent in the lookup key.
+                const activeWhere = {
+                    COMPANY_CODE: row.COMPANY_CODE,
+                    PAYMENT_TYPE: row.PAYMENT_TYPE,
+                    PAYMENT_SUB_TYPE: row.PAYMENT_SUB_TYPE,
+                    TXN_AMOUNT: row.TXN_AMOUNT,
+                    HOST_MDR_AMOUNT: row.HOST_MDR_AMOUNT,
+                    HOST_FEE_PAYABLE: row.HOST_FEE_PAYABLE,
+                    MOBI_MDR_AMOUNT: row.MOBI_MDR_AMOUNT,
+                    MDR_REVENUE: row.MDR_REVENUE,
+                    Status: "A"
+                };
+                if (!PaymentCatalog.isHostIndependentType(row.PAYMENT_TYPE)) {
+                    activeWhere.HOST_NAME = row.HOST_NAME;
+                }
+
                 const existingActive = await SELECT.one
                     .from(valuelookup)
-                    .where({
-                        COMPANY_CODE: row.COMPANY_CODE,
-                        PAYMENT_TYPE: row.PAYMENT_TYPE,
-                        PAYMENT_SUB_TYPE: row.PAYMENT_SUB_TYPE,
-                        HOST_NAME: row.HOST_NAME,
-                        TXN_AMOUNT: row.TXN_AMOUNT,
-                        HOST_MDR_AMOUNT: row.HOST_MDR_AMOUNT,
-                        HOST_FEE_PAYABLE: row.HOST_FEE_PAYABLE,
-                        MOBI_MDR_AMOUNT: row.MOBI_MDR_AMOUNT,
-                        MDR_REVENUE: row.MDR_REVENUE,
-                        Status: "A"
-                    });
+                    .where(activeWhere);
 
                 if (existingActive) {
-
                     await UPDATE(valuelookup)
                         .set({
                             Status: "I",
                             CHANGED_BY: row.CHANGED_BY,
                             CHANGED_TIMESTAMP: new Date()
                         })
-                        .where({
-                            COMPANY_CODE: row.COMPANY_CODE,
-                            PAYMENT_TYPE: row.PAYMENT_TYPE,
-                            PAYMENT_SUB_TYPE: row.PAYMENT_SUB_TYPE,
-                            HOST_NAME: row.HOST_NAME,
-                            TXN_AMOUNT: row.TXN_AMOUNT,
-                            HOST_MDR_AMOUNT: row.HOST_MDR_AMOUNT,
-                            HOST_FEE_PAYABLE: row.HOST_FEE_PAYABLE,
-                            MOBI_MDR_AMOUNT: row.MOBI_MDR_AMOUNT,
-                            MDR_REVENUE: row.MDR_REVENUE,
-                            Status: "A"
-                        });
+                        .where(activeWhere);
                 }
 
                 // New record will be Active

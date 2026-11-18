@@ -40,22 +40,25 @@ class S4PoClient {
 
   /**
    * Fetch PO headers created in [fromDate, toDate).
-   * @returns {Promise<{rows:Array, range:object, degraded:boolean}>}
+   * @returns {Promise<{rows:Array, range:object, degraded:boolean, truncated:boolean}>}
    *   degraded=true when the date filter was rejected by the service and the
    *   query fell back to "most recent POs" (still safe — the caller de-dupes).
+   *   truncated=true when the CreationDate window was NOT fully read (page
+   *   safety ceiling reached) — the caller must hold the run watermark so
+   *   unread POs are retried on the next tick instead of being skipped.
    */
   async getPurchaseOrders({ fromDate, toDate, purchaseOrder = '', companyCode = '', documentType = '' } = {}) {
     const destination = await this._getDestination();
 
     if (purchaseOrder) {
       const payload = await this._getJson(this._buildSinglePoUrl(destination.url, purchaseOrder), destination);
-      return { rows: this._extractRows(payload), range: null, degraded: false };
+      return { rows: this._extractRows(payload), range: null, degraded: false, truncated: false };
     }
 
     const range = this._buildRange(fromDate, toDate);
     try {
       const rows = await this._fetchAll(destination, range, companyCode, documentType, true);
-      return { rows, range, degraded: false };
+      return { rows, range, degraded: false, truncated: Boolean(this.lastFetchTruncated) };
     } catch (error) {
       // A CDS view that does not expose CreationDate (or a differently named
       // date property) rejects the $filter. Fall back to the newest POs by
@@ -66,7 +69,7 @@ class S4PoClient {
         `Retrying without the date filter, relying on duplicate-send protection.`
       );
       const rows = await this._fetchAll(destination, range, companyCode, documentType, false);
-      return { rows, range, degraded: true };
+      return { rows, range, degraded: true, truncated: Boolean(this.lastFetchTruncated) };
     }
   }
 
@@ -292,7 +295,7 @@ class S4PoClient {
 
       // NavigationProperty names inside that EntityType
       const typeMatch = new RegExp(
-        `<EntityType[^>]*Name="${typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[^>]*>([\s\S]*?)</EntityType>`
+        `<EntityType[^>]*Name="${typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}">([\\s\\S]*?)</EntityType>`
       ).exec(xml);
       const block = typeMatch ? typeMatch[1] : '';
       const nav = [...block.matchAll(/<NavigationProperty[^>]*Name="([^"]+)"/g)].map((m) => m[1]);
@@ -389,6 +392,8 @@ class S4PoClient {
     let skip = null;
     let page = 0;
     let prevPageKey = '';
+    let exhausted = false;
+    this.lastFetchTruncated = false;
 
     while (page < this.maxPages) {
       page += 1;
@@ -437,7 +442,7 @@ class S4PoClient {
       prevPageKey = pageKey;
 
       rows.push(...pageRows);
-      if (pageRows.length === 0) break;
+      if (pageRows.length === 0) { exhausted = true; break; }
 
       // A service that hands back a next-page link uses it (token or offset).
       const next = this._extractNextPage(payload);
@@ -460,13 +465,21 @@ class S4PoClient {
         skipToken = '';
         continue;
       }
+      exhausted = true;
       break;
     }
 
-    if (page >= this.maxPages) {
-      console.warn(`[S4PoClient] Stopped after ${this.maxPages} pages (PO_MAIL_MAX_PAGES). Narrow the date range.`);
+    const truncated = !exhausted;
+    this.lastFetchTruncated = truncated;
+    if (truncated) {
+      console.warn(
+        `[S4PoClient] CreationDate window NOT fully read: stopped at ${page} page(s) / ${rows.length} row(s) ` +
+        `(PO_MAIL_MAX_PAGES=${this.maxPages}). Unread POs stay in the window — this run will hold the ` +
+        'watermark and retry them next tick (no PO is skipped). Fixing the YY1_PO_EMAIL view fan-out ' +
+        'makes this ceiling unreachable.'
+      );
     }
-    console.log(`[S4PoClient] Read ${rows.length} purchase order row(s) in ${page} page(s) from ${this.destinationName}.`);
+    console.log(`[S4PoClient] Read ${rows.length} purchase order row(s) in ${page} page(s) from ${this.destinationName}${truncated ? ' — TRUNCATED' : ''}.`);
     return rows;
   }
 

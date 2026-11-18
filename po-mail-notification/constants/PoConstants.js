@@ -54,7 +54,10 @@ module.exports = Object.freeze({
    */
   ITEM_PATH: process.env.PO_MAIL_ITEM_PATH || '',
 
-  /** 'V2' | 'V4' — controls literal style ($filter) and pagination handling. */
+  /**
+   * 'V2' | 'V4' — controls literal style ($filter) and pagination handling.
+   * '/sap/opu/odata/sap/' confirms OData V2 for YY1_PO_EMAIL_CDS.
+   */
   ODATA_VERSION: process.env.PO_MAIL_ODATA_VERSION || 'V2',
 
   /**
@@ -85,7 +88,14 @@ module.exports = Object.freeze({
   PAGE_SIZE: Number(process.env.PO_MAIL_PAGE_SIZE || 100),
 
   /** Safety cap so a bad filter can never pull the whole PO table. */
-  MAX_PAGES: Number(process.env.PO_MAIL_MAX_PAGES || 20),
+  MAX_PAGES: Number(process.env.PO_MAIL_MAX_PAGES || 200),
+
+  /**
+   * Read window mode: 'rolling' (default) = last successful run minus a 48 h
+   * overlap; 'today' = only POs whose CreationDate is today in TIME_ZONE.
+   * 'today' never reads earlier days — a PO missed past midnight stays unread.
+   */
+  MAIL_WINDOW_MODE: String(process.env.PO_MAIL_WINDOW || 'rolling').trim().toLowerCase(),
 
   /** Fallback window when the action is called without an explicit range. */
   DEFAULT_LOOKBACK_DAYS: Number(process.env.PO_MAIL_LOOKBACK_DAYS || 1),

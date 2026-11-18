@@ -160,6 +160,7 @@ sap.ui.define([
                     var aErrors = [];
                     var oGLMap = {}; //for Duplicate GL Accounts
                     var oCombinationMap = {}; // For duplicate combination
+                    var oHostIndependentMap = {}; // Company/type/subtype/flag -> one GL account
                     var iDuplicateCount = 0;
                     var aDuplicateGLs = [];
 
@@ -259,6 +260,30 @@ sap.ui.define([
 
                             oCombinationMap[sCombinationKey] = iRow;
 
+                        }
+
+                        // Deposit/Withdraw ignore Host in consolidation GL lookup.
+                        // Flag two different accounts for the same effective key
+                        // here, rather than allowing the batch and failing later.
+                        if (bHostIndependent && sSequence && sGLAccounts) {
+                            var sNormalizedSubtype = sPaymentSubType.replace(/[^A-Z0-9]/g, "");
+                            var sHostIndependentKey = [
+                                sCompanyCode, sNormType, sNormalizedSubtype, sSequence
+                            ].join("|");
+                            var oExistingMapping = oHostIndependentMap[sHostIndependentKey];
+                            if (oExistingMapping && oExistingMapping.glAccount !== sGLAccounts) {
+                                aErrors.push(
+                                    "Row " + iRow + ": Conflicting GL account for " +
+                                    sNormType + " / " + sPaymentSubType + " / " +
+                                    sSequence + ". One GL account is allowed per company, type, subtype and amount flag."
+                                );
+                                bInvalid = true;
+                            } else if (!oExistingMapping) {
+                                oHostIndependentMap[sHostIndependentKey] = {
+                                    glAccount: sGLAccounts,
+                                    row: iRow
+                                };
+                            }
                         }
 
                         // Exactly one field should contain 'X'

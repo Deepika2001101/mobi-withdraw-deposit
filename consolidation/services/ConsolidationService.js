@@ -281,21 +281,21 @@ class ConsolidationService {
         });
       }
 
-      // All-or-nothing: if ANY record has a missing GL/BP (or an unbalanced
-      // document), do NOT insert any documents. This stops CPI from posting a
-      // partial journal entry now and a second one later once the missing GL/BP
-      // is configured. The valid records simply stay pending and are retried
-      // on the next run.
+      // Daily/grouped scenarios retain the existing all-or-nothing rule: if any
+      // source record fails validation, do not persist a partial grouped journal.
+      // Deposit/Withdraw are explicitly per-transaction documents, so a bad
+      // transaction cannot contaminate a good document; persist only the
+      // individually validated/balanced documents and leave failed rows retryable.
       //
-      // Persistence is one explicit CAP transaction: header + line items +
-      // source-transaction status + document-success audit commit together, or
-      // roll back together. `persistedDocuments` (not the built documents) drives
-      // the reported created counts so a blocked run never looks like an insert.
+      // Each persistence batch is still one CAP transaction: headers, line items,
+      // source-transaction status, and success audit commit or roll back together.
+      // `persistedDocuments` drives the reported counts.
+      const canPersistWithErrors = scenario.partialConsolidationOnErrors === true;
       let persistedDocuments = [];
       let insertedHeaders = 0;
       let insertedLineItems = 0;
 
-      if (documents.length && !errorRecords.length) {
+      if (documents.length && (!errorRecords.length || canPersistWithErrors)) {
         const db = await cds.connect.to('db');
         await db.tx(async (tx) => {
           const inserted = await this.consolidationRepository.insertDocuments(

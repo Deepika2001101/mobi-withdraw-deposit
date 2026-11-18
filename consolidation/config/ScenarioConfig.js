@@ -198,6 +198,9 @@ module.exports = Object.freeze({
     glIgnoreHost: true,
     glSubTypeFromRecord: true,
     subTypeMatchNormalized: true,
+    // Each transaction is its own independent accounting document. Valid rows
+    // may be committed even if other Deposit rows fail GL/BP validation.
+    partialConsolidationOnErrors: true,
     requiredGlAccountFields: [
       { glFlagField: 'TXN_AMOUNT', amountField: 'TXN_AMOUNT' }
     ]
@@ -228,6 +231,9 @@ module.exports = Object.freeze({
     glIgnoreHost: true,
     glSubTypeFromRecord: true,
     subTypeMatchNormalized: true,
+    // Each transaction is its own independent accounting document. Valid rows
+    // may be committed even if other Withdraw rows fail GL/BP validation.
+    partialConsolidationOnErrors: true,
     requiredGlAccountFields: [
       { glFlagField: 'TXN_AMOUNT', amountField: 'TXN_AMOUNT' }
     ]

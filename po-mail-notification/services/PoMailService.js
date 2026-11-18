@@ -107,19 +107,28 @@ class PoMailService {
 
     // 2. Date range: explicit > overlapping watermark > lookback.
     //
-    // S/4's CreationDate in YY1_PO_EMAIL is date-only and is returned at
-    // midnight (e.g. 2026-11-04T00:00:00). An exact last-run timestamp later
-    // that day would exclude that PO on the next poll. Re-read a 48-hour
-    // overlap; the mail repository de-duplicates rows already handled by this
-    // app instance (and by the persistent log, when deployed).
+    // YY1_PO_EMAIL exposes CreationDate as a date-only S/4 business date. Its
+    // calendar may differ from the local email/display timezone around
+    // midnight (for example, S/4 can still report yesterday while India is
+    // already on tomorrow). Keep the scan's calendar configurable separately
+    // from PO_MAIL_TIME_ZONE, which is used only for rendered email dates.
+    const creationDateTimeZone = String(
+      process.env.PO_MAIL_CREATION_DATE_TIME_ZONE || Constants.TIME_ZONE
+    ).trim();
     const lastRun = this.repository.getLastRunWatermark();
     const overlapFromDate = lastRun
       ? new Date(lastRun.getTime() - (48 * 60 * 60 * 1000))
       : null;
+    const todayOnly = Constants.MAIL_WINDOW_MODE === 'today';
     const fromDate = args.fromDate
-      || overlapFromDate
-      || daysAgoStart(args.lookbackDays ?? Constants.DEFAULT_LOOKBACK_DAYS, Constants.TIME_ZONE);
+      || (todayOnly ? daysAgoStart(1, creationDateTimeZone) : overlapFromDate)
+      || daysAgoStart(args.lookbackDays ?? Constants.DEFAULT_LOOKBACK_DAYS, creationDateTimeZone);
     const toDate = args.toDate || null;
+    console.log(
+      `[PoMailService] PO scan window: mode=${Constants.MAIL_WINDOW_MODE}, ` +
+      `field=${Constants.CREATED_ON_FIELD}, timezone=${creationDateTimeZone}, ` +
+      `from=${fromDate.toISOString()}, to=${toDate ? toDate.toISOString() : 'open'}.`
+    );
     result.range = args.purchaseOrder
       ? { purchaseOrder: args.purchaseOrder }
       : { from: fromDate.toISOString(), to: toDate ? toDate.toISOString() : null };
@@ -133,11 +142,15 @@ class PoMailService {
       documentType: args.documentType || ''
     });
     result.degraded = Boolean(fetched.degraded);
+    const windowTruncated = Boolean(fetched.truncated);
+    result.truncated = windowTruncated;
     result.read = (fetched.rows || []).length;
     if (!result.read) {
-      result.message = 'No purchase order found for the selected range.';
+      result.message = windowTruncated
+        ? 'Read window truncated before any row was read — watermark held, retrying next tick.'
+        : 'No purchase order found for the selected range.';
       result.finishedAt = new Date().toISOString();
-      this.repository.setLastRunWatermark(startedAt);
+      if (!windowTruncated) this.repository.setLastRunWatermark(startedAt);
       return result;
     }
 
@@ -209,7 +222,16 @@ class PoMailService {
     }
 
     result.finishedAt = new Date().toISOString();
-    if (!dryRun) this.repository.setLastRunWatermark(startedAt);
+    if (!dryRun) {
+      if (windowTruncated) {
+        console.warn(
+          `[PoMailService] run ${runId}: watermark HELD — the CreationDate window was not fully read; ` +
+          'unread POs are retried on the next tick (no PO will be skipped).'
+        );
+      } else {
+        this.repository.setLastRunWatermark(startedAt);
+      }
+    }
     result.message = this._summarize(result);
     console.log(`[PoMailService] run ${runId}: ${result.message}`);
     return result;
@@ -944,7 +966,10 @@ class PoMailService {
       `${result.skippedNoApprover} without approver`,
       `${result.failed} failed`
     ];
-    return parts.join(', ') + '.';
+    const summary = parts.join(', ') + '.';
+    return result.truncated
+      ? `${summary} Window TRUNCATED — watermark held, unread POs retry next tick.`
+      : summary;
   }
 
   /** Build + send a notification for the S/4HANA My Inbox level. */

@@ -5,7 +5,7 @@ Content-Type: application/json
 POST https://mobiversa-private-limited-mobi-dev-space-mobi-dev-cap-srv.cfapps.us10-001.hana.ondemand.com/odata/v4/po-mail-notification/triggerPoMailNotification
 
 {
-  "purchaseOrder": "5100000248",
+  "purchaseOrder": "5300000046",
   "force": true,
   "dryRun": true
 }
@@ -15,9 +15,9 @@ POST http://localhost:4004/odata/v4/po-mail-notification/triggerPoMailNotificati
 Content-Type: application/json
 
 {
-  "purchaseOrder": "5100000248",
+  "purchaseOrder": "5300000046",
   "force": true,
-  "dryRun": f
+  "dryRun": false
 }
 #########
 ### Send PO 5100000168 email
@@ -25,7 +25,7 @@ POST http://localhost:4004/odata/v4/po-mail-notification/triggerPoMailNotificati
 Content-Type: application/json
 
 {
-  "purchaseOrder": "5100000181",
+  "purchaseOrder": "5100000261",
   "force": true,
   "dryRun": true
 }
@@ -200,3 +200,9 @@ Content-Type: application/json
 {
  
 }
+
+####
+POST http://localhost:4004/odata/v4/journal-entry-reversal/syncReversedDocuments
+Content-Type: application/json
+
+{}
