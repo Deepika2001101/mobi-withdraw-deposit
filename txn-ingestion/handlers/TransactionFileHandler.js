@@ -220,11 +220,9 @@ async commitOrWriteOutputs(file, context) {
   const result = { totalRows: context.totalRows, validCount, errorCount };
 
   if (errorCount > 0) {
-    const partiallyValid = validCount > 0;
-
     const detail = `${errorCount} record(s) failed validation. Entire file rejected; ` +
-      `${validCount} otherwise-valid record(s) were not inserted.` +
-      (partiallyValid ? ' Original payload kept in PROCESSING and copied to PROCESSED.' : '');
+      `${validCount} otherwise-valid record(s) were not inserted. ` +
+      'The original file is retained in PROCESSING for correction and retry.';
 
     const errorOutputs = await this.errorFileHandler.handle(file, context.allRecords, {
       paths: context.paths,
@@ -238,28 +236,12 @@ async commitOrWriteOutputs(file, context) {
       sourceBaseNaming: Constants.FILES.TRANSACTION_REVERSAL_REGEX.test(file.name)
     });
 
-    // The file keeps living in PROCESSING for partial rejects.
-    let finalPath = context.processingPath;
-
-    if (partiallyValid && context.completedPath) {
-      try {
-        const payload = context.buffer
-          ? context.buffer
-          : await this.sftpService.downloadFile(context.processingPath);
-        await this.sftpService.uploadFile(context.completedPath, payload);
-      } catch (cause) {
-        console.warn(
-          `[TransactionFileHandler] Could not copy partial file to PROCESSED: ${cause.message}. ` +
-          'Source remains in PROCESSING.'
-        );
-      }
-    } else if (context.processingPath) {
-      try {
-        await this.sftpService.deleteFile(context.processingPath);
-      } catch (cause) {
-        console.warn(`[TransactionFileHandler] Could not delete rejected source: ${cause.message}`);
-      }
-    }
+    // Keep the source in PROCESSING for every validation rejection, regardless
+    // of how many rows were valid. ErrorFileHandler writes only the generated
+    // *_ERRORS.csv and text report to ERROR. Do not copy the source to ERROR or
+    // PROCESSED, or delete it: retry discovery needs the original PROCESSING file
+    // when the operator drops a matching *_Updated.csv file into FILE_IN.
+    const finalPath = context.processingPath;
 
     await this.auditRepository.finalizeRows(
       context.auditId,
@@ -352,13 +334,31 @@ async commitOrWriteOutputs(file, context) {
       STATUS_MESSAGE: detail
     }));
 
-    let finalPath = file.path;
-    try {
-      await this.sftpService.moveFile(file.path, context.errorPath);
-      finalPath = context.errorPath;
-      file.path = finalPath;
-    } catch (error) {
-      console.warn(`[TransactionFileHandler] Could not move duplicate input: ${error.message}`);
+    const sourcePath = file.path;
+    const processingPath = context.processingPath || sourcePath;
+    let finalPath = processingPath;
+    let duplicateFileInPathToDelete = null;
+
+    // Keep the canonical original in PROCESSING. If this duplicate came from
+    // FILE_IN and an original is already there, discard only the extra FILE_IN
+    // copy after its error outputs are safely written; never overwrite or move
+    // the existing PROCESSING source. If no PROCESSING copy exists yet, put this
+    // source there for correction/retry.
+    const alreadyInProcessing = file.source === 'processing' || sourcePath === processingPath;
+    if (!alreadyInProcessing && processingPath) {
+      try {
+        const targetExists = await this.sftpService.exists(processingPath);
+        if (targetExists && targetExists !== 'd') {
+          duplicateFileInPathToDelete = sourcePath;
+        } else {
+          await this.sftpService.moveFile(sourcePath, processingPath);
+          file.path = processingPath;
+          file.source = 'processing';
+        }
+      } catch (error) {
+        console.warn(`[TransactionFileHandler] Could not retain duplicate input in PROCESSING: ${error.message}`);
+        finalPath = sourcePath;
+      }
     }
 
     const errorOutputs = await this.errorFileHandler.handle(file, rows, {
@@ -373,6 +373,14 @@ async commitOrWriteOutputs(file, context) {
       fileLevelFailure: true,
       sourceBaseNaming: Constants.FILES.TRANSACTION_REVERSAL_REGEX.test(file.name)
     });
+
+    if (duplicateFileInPathToDelete) {
+      try {
+        await this.sftpService.deleteFile(duplicateFileInPathToDelete);
+      } catch (error) {
+        console.warn(`[TransactionFileHandler] Could not remove duplicate FILE_IN copy: ${error.message}`);
+      }
+    }
 
     const result = { totalRows: rows.length, validCount: 0, errorCount: rows.length };
     await this.fileLogRepository.updateResult(

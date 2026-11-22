@@ -68,6 +68,34 @@ class PoMailService {
     const dryRun = args.dryRun === true;
     const actor = args.actor || Constants.SYSTEM_USER;
 
+    // Recovery: report any checkpoint rows left in SENDING by a crash or DB
+    // disconnection between claim and finalize. These rows are NOT auto-reset
+    // to ACTIVE — if the mail was actually sent but finalize() failed, resetting
+    // would cause a duplicate send. They stay in SENDING to block re-sends.
+    // If a row is genuinely stuck (mail was never sent), use forceResetSending
+    // to release it manually.
+    try {
+      const stale = await this.workflowProgress.findStaleSending();
+      if (stale && stale.length) {
+        console.warn(
+          `[PoMailService] Startup recovery: ${stale.length} PO checkpoint(s) stuck in SENDING ` +
+          '(mail may have been sent before a DB disconnection). Leaving them in SENDING to block ' +
+          'duplicate sends. Use forceResetSending to manually release a row if the mail was NOT sent.'
+        );
+        for (const row of stale) {
+          console.warn(
+            `[PoMailService] Stuck SENDING: PO ${row.PO_NUMBER} (Company ${row.COMPANY_CODE}), ` +
+            `tasks=${row.LAST_COMPLETED_TASKS}`
+          );
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[PoMailService] Startup recovery (findStaleSending) failed: ${error.message}. ` +
+        'Stuck SENDING rows will be reported on a later run.'
+      );
+    }
+
     const result = {
       runId,
       startedAt: startedAt.toISOString(),
@@ -116,13 +144,52 @@ class PoMailService {
       process.env.PO_MAIL_CREATION_DATE_TIME_ZONE || Constants.TIME_ZONE
     ).trim();
     const lastRun = this.repository.getLastRunWatermark();
+    // INCREMENTAL SCAN WINDOW (today mode): after a scan completes, the
+    // watermark advances to that run's start time. Subsequent scans then read
+    // only rows created AFTER (watermark - 10min overlap) instead of
+    // re-reading the entire 2-day window on every 1-minute tick. Re-reading
+    // ~20K rows/min (20+ pages, thousands of DB checkpoint calls) never
+    // finished before the next tick overlapped, exhausting the DB connection
+    // pool ("Database connection is disconnected") and causing OOM kills
+    // (exit 137). New POs always sort to page 1 (CreationDate desc, PurchaseOrder
+    // desc) so the fast trigger still mails them within ~1 min; the 10-min
+    // overlap catches anything created mid-scan. The yesterday-UTC floor
+    // guarantees a full catch-up on the first run / after a crash (stale or
+    // absent watermark). Rolling mode keeps its 48h overlap (unchanged).
+    const yesterdayUtc = daysAgoStart(2, 'UTC');
+    const todayOverlapFrom = lastRun
+      ? new Date(lastRun.getTime() - (10 * 60 * 1000))
+      : null;
+    const todayFromDate = todayOverlapFrom && todayOverlapFrom.getTime() > yesterdayUtc.getTime()
+      ? todayOverlapFrom
+      : yesterdayUtc;
     const overlapFromDate = lastRun
       ? new Date(lastRun.getTime() - (48 * 60 * 60 * 1000))
       : null;
     const todayOnly = Constants.MAIL_WINDOW_MODE === 'today';
+    // TODAY mode: scan from YESTERDAY's midnight UTC with no upper bound.
+    // CreationDate is date-only on S/4's UTC calendar. A PO created 00:00-05:30
+    // IST is stored with CreationDate = yesterday (UTC), so a filter starting
+    // at TODAY's UTC midnight (daysAgoStart(0)) would miss it entirely — as
+    // observed in production ("PO created just after midnight IST, no mail").
+    // Starting the filter at yesterday 00:00 UTC (the incremental floor) catches
+    // ALL of today's POs (both the early-morning ones stored as yesterday and the
+    // rest stored as today). The watermark + duplicate protection skip
+    // already-mailed POs, so only genuinely new POs get mailed. On the first run
+    // this reads ~2 calendar days of rows (~2K-4K with 1K-2K POs/day); once the
+    // watermark advances, re-scans read only a 10-min overlap instead of the
+    // 78K+ rows the old 2-day lookback was pulling on every tick.
+    // ROLLING mode: scan from the watermark overlap (last run - 48h) to open.
+    // TODAY mode: incremental — from the watermark overlap (or yesterday-UTC
+    // floor on first run / after a crash). ROLLING mode: 48h watermark overlap.
+    // First run after restart (no watermark yet) falls back to yesterday-UTC
+    // so a restart still catches POs created in the early-morning IST window.
     const fromDate = args.fromDate
-      || (todayOnly ? daysAgoStart(1, creationDateTimeZone) : overlapFromDate)
-      || daysAgoStart(args.lookbackDays ?? Constants.DEFAULT_LOOKBACK_DAYS, creationDateTimeZone);
+      || (todayOnly ? todayFromDate : overlapFromDate)
+      || yesterdayUtc;
+    // TODAY mode: no upper bound (to=open) so all of today's POs are caught
+    // regardless of the IST/UTC date-only offset. Rolling mode also uses
+    // to=open (scans from watermark to now).
     const toDate = args.toDate || null;
     console.log(
       `[PoMailService] PO scan window: mode=${Constants.MAIL_WINDOW_MODE}, ` +
@@ -133,100 +200,188 @@ class PoMailService {
       ? { purchaseOrder: args.purchaseOrder }
       : { from: fromDate.toISOString(), to: toDate ? toDate.toISOString() : null };
 
-    // 3. Read from S/4HANA.
-    const fetched = await this.client.getPurchaseOrders({
-      fromDate,
-      toDate,
-      purchaseOrder: args.purchaseOrder || '',
-      companyCode: args.companyCode || '',
-      documentType: args.documentType || ''
-    });
-    result.degraded = Boolean(fetched.degraded);
-    const windowTruncated = Boolean(fetched.truncated);
-    result.truncated = windowTruncated;
-    result.read = (fetched.rows || []).length;
-    if (!result.read) {
-      result.message = windowTruncated
-        ? 'Read window truncated before any row was read — watermark held, retrying next tick.'
-        : 'No purchase order found for the selected range.';
-      result.finishedAt = new Date().toISOString();
-      if (!windowTruncated) this.repository.setLastRunWatermark(startedAt);
-      return result;
+    // 3. FAST TRIGGER — read page 1 only and mail any new POs immediately,
+    //    before the full multi-page scan. New POs are always the newest
+    //    (sorted CreationDate desc, PurchaseOrder desc) so they land on page 1.
+    //    This makes a brand-new PO mail within ~1 tick instead of waiting for
+    //    the entire 200-page scan to finish. The full scan below then reads
+    //    every page for catch-up; duplicate protection skips POs already
+    //    handled by the fast pass.
+    const sharedAlreadySent = new Set();
+    const sharedWorkflowTracked = new Set();
+    let sharedWorkflowCheckUnavailable = false;
+    let fastCapped = false;
+    let fastRemaining = 0;
+    // Run-level PO cap, shared across the fast trigger and every scan page so
+    // the total POs processed in this run is bounded (see _mailFromRows).
+    const runCap = { processed: 0, max: this._maxPoPerRun(), capped: false };
+
+    if (!args.purchaseOrder) {
+      const page1 = await this.client.getPurchaseOrders({
+        fromDate,
+        toDate,
+        companyCode: args.companyCode || '',
+        documentType: args.documentType || '',
+        firstPageOnly: true
+      });
+      const fastOutcome = await this._mailFromRows({
+        rows: page1.rows || [],
+        routing, smtpConfig, runId, actor, dryRun, startedAt,
+        alreadySent: sharedAlreadySent,
+        workflowTracked: sharedWorkflowTracked,
+        workflowCheckUnavailable: sharedWorkflowCheckUnavailable,
+        force: args.force,
+        runCap
+      });
+      sharedWorkflowCheckUnavailable = fastOutcome.workflowCheckUnavailable;
+      fastCapped = fastOutcome.capped || fastCapped;
+      fastRemaining = Math.max(fastRemaining, fastOutcome.remaining);
+      if (fastOutcome.mailed > 0) {
+        console.log(
+          `[PoMailService] run ${runId}: fast page-1 trigger mailed ${fastOutcome.mailed} new PO(s) ` +
+          `before the full scan (${fastOutcome.new} new on page 1).`
+        );
+      }
     }
 
-    // 4. Normalise + group the flat rows into PO objects (header + items).
-    const purchaseOrders = this._groupAndNormalize(fetched.rows);
+    // 4. FULL SCAN — read every page in the window for catch-up. POs already
+    //    mailed by the fast pass are skipped by the shared dedup sets (and the
+    //    persistent mail log / workflow checkpoint).
+    // 4. FULL SCAN — stream pages one at a time: read a page, mail from it,
+    //    discard the rows, then read the next page. This keeps memory bounded
+    //    to one page (~1000 rows) instead of accumulating all 78K+ rows in
+    //    memory (which caused OOM kills / exit 137 on every scan).
+    //    The shared dedup sets carry across pages, so POs mailed on page 1
+    //    are skipped on page 2+.
+    let totalRowsRead = 0;
+    const streamOutcome = {
+      new: 0, mailed: 0, dryRunPrepared: 0, skippedAlreadySent: 0,
+      skippedAutoApprove: 0, skippedNoApprover: 0, failed: 0,
+      purchaseOrders: [], workflowCheckUnavailable: false,
+      capped: false, remaining: 0
+    };
 
-    // 5. De-duplicate against the mail log and the existing S/4 workflow
-    // checkpoint. The workflow table is also a persistent marker that the
-    // initial notification was sent, so a restart does not re-mail a recent
-    // multi-level PO when the optional mail-log entity is not deployed.
-    let alreadySent = new Set();
-    const workflowTracked = new Set();
-    let workflowCheckUnavailable = false;
-    if (!args.force) {
-      alreadySent = await this.repository.filterAlreadySent(
-        purchaseOrders.map((po) => ({ poNumber: po.poNumber, companyCode: po.companyCode }))
-      );
-
-      for (const po of purchaseOrders) {
-        const key = `${po.companyCode}|${po.poNumber}`;
-        if (!po.poNumber || alreadySent.has(key)) continue;
-        try {
-          const checkpoint = await this.workflowProgress.get(po.poNumber, po.companyCode);
-          if (checkpoint) workflowTracked.add(key);
-        } catch (error) {
-          console.warn(
-            `[PoMailService] Persistent PO-mail duplicate check unavailable for PO ${po.poNumber}: ${error.message}`
+    if (args.purchaseOrder) {
+      // Single-PO scan: just fetch and process directly.
+      const fetched = await this.client.getPurchaseOrders({
+        fromDate,
+        toDate,
+        purchaseOrder: args.purchaseOrder,
+        companyCode: args.companyCode || '',
+        documentType: args.documentType || ''
+      });
+      result.degraded = Boolean(fetched.degraded) || sharedWorkflowCheckUnavailable;
+      result.truncated = Boolean(fetched.truncated);
+      result.read = (fetched.rows || []).length;
+      if (!result.read) {
+        result.message = 'No purchase order found for the selected PO.';
+        result.finishedAt = new Date().toISOString();
+        this.repository.setLastRunWatermark(startedAt);
+        return result;
+      }
+      const singleOutcome = await this._mailFromRows({
+        rows: fetched.rows || [],
+        routing, smtpConfig, runId, actor, dryRun, startedAt,
+        alreadySent: sharedAlreadySent,
+        workflowTracked: sharedWorkflowTracked,
+        workflowCheckUnavailable: sharedWorkflowCheckUnavailable,
+        force: args.force
+      });
+      sharedWorkflowCheckUnavailable = singleOutcome.workflowCheckUnavailable;
+      Object.assign(streamOutcome, {
+        new: singleOutcome.new, mailed: singleOutcome.mailed,
+        dryRunPrepared: singleOutcome.dryRunPrepared,
+        skippedAlreadySent: singleOutcome.skippedAlreadySent,
+        skippedAutoApprove: singleOutcome.skippedAutoApprove,
+        skippedNoApprover: singleOutcome.skippedNoApprover,
+        failed: singleOutcome.failed,
+        purchaseOrders: singleOutcome.purchaseOrders
+      });
+    } else {
+      // Full scan: stream pages, process each, discard rows.
+      const fetched = await this.client.getPurchaseOrdersPaged({
+        fromDate,
+        toDate,
+        companyCode: args.companyCode || '',
+        documentType: args.documentType || '',
+        pageProcessor: async (pageRows, pageNum) => {
+          totalRowsRead += pageRows.length;
+          if (!pageRows.length) return false;
+          // Once the run-level PO cap is hit, stop reading further pages — no
+          // more POs can be mailed this tick and the rest of the window is
+          // wasted I/O. Returning true tells _fetchAll to stop pagination.
+          if (runCap.capped) return true;
+          const pageOutcome = await this._mailFromRows({
+            rows: pageRows,
+            routing, smtpConfig, runId, actor, dryRun, startedAt,
+            alreadySent: sharedAlreadySent,
+            workflowTracked: sharedWorkflowTracked,
+            workflowCheckUnavailable: sharedWorkflowCheckUnavailable,
+            force: args.force,
+            runCap
+          });
+          sharedWorkflowCheckUnavailable = pageOutcome.workflowCheckUnavailable;
+          streamOutcome.new += pageOutcome.new;
+          streamOutcome.mailed += pageOutcome.mailed;
+          streamOutcome.dryRunPrepared += pageOutcome.dryRunPrepared;
+          streamOutcome.skippedAlreadySent += pageOutcome.skippedAlreadySent;
+          streamOutcome.skippedAutoApprove += pageOutcome.skippedAutoApprove;
+          streamOutcome.skippedNoApprover += pageOutcome.skippedNoApprover;
+          streamOutcome.failed += pageOutcome.failed;
+          streamOutcome.purchaseOrders.push(...pageOutcome.purchaseOrders);
+          console.log(
+            `[PoMailService] run ${runId}: page ${pageNum} processed (${pageRows.length} rows, ` +
+            `${streamOutcome.mailed} mailed so far, ${streamOutcome.skippedAlreadySent} skipped).`
           );
-          // Fail closed for live runs: without the persistent workflow checkpoint,
-          // this process cannot prove that a candidate is genuinely new. Sending
-          // here could re-mail every same-day PO after a restart.
-          workflowCheckUnavailable = true;
-          break;
+          // Stop pagination when the PO cap is hit OR when the workflow
+          // checkpoint DB is unavailable. In the unavailable case _mailFromRows
+          // skips every PO (returning before the cap loop), so runCap.capped
+          // stays false — without this check the scan reads ALL pages every
+          // tick, streaming the full window into memory and OOMing the instance
+          // (exit 137). Returning true stops the scan; the watermark is held
+          // in run() so every PO is retried on the next tick when DB access
+          // returns.
+          return runCap.capped || sharedWorkflowCheckUnavailable;
         }
+      });
+      result.degraded = Boolean(fetched.degraded) || sharedWorkflowCheckUnavailable;
+      result.truncated = Boolean(fetched.truncated);
+      result.read = totalRowsRead;
+      if (!totalRowsRead) {
+        result.message = fetched.truncated
+          ? 'Read window truncated before any row was read — watermark held, retrying next tick.'
+          : 'No purchase order found for the selected range.';
+        result.finishedAt = new Date().toISOString();
+        if (!fetched.truncated) this.repository.setLastRunWatermark(startedAt);
+        return result;
       }
     }
 
-    if (workflowCheckUnavailable && !dryRun && !args.force) {
-      result.degraded = true;
-      result.finishedAt = new Date().toISOString();
-      result.message = 'No PO mail sent: persistent workflow checkpoint is unavailable. Restore DB access before live polling.';
-      console.error(`[PoMailService] run ${runId}: ${result.message}`);
-      return result;
-    }
-
-    const pending = purchaseOrders.filter((po) => {
-      if (!po.poNumber) return false;
-      const key = `${po.companyCode}|${po.poNumber}`;
-      if (alreadySent.has(key) || workflowTracked.has(key)) {
-        result.skippedAlreadySent += 1;
-        if (workflowTracked.has(key)) {
-          console.log(`[PoMailService] PO ${po.poNumber}: existing workflow checkpoint; skipping duplicate initial mail.`);
-        }
-        return false;
-      }
-      return true;
-    });
-    result.new = pending.length;
-
-    // 6./7. Route + mail each pending PO. Failures are collected, never thrown.
-    for (const po of pending) {
-      const outcome = await this._processOne({ po, routing, smtpConfig, runId, actor, dryRun, startedAt });
-      result.purchaseOrders.push(outcome.entry);
-      if (outcome.status === 'SENT') result.mailed += 1;
-      else if (outcome.status === 'DRY_RUN') result.dryRunPrepared += 1;
-      else if (outcome.status === 'AUTO_APPROVED') result.skippedAutoApprove += 1;
-      else if (outcome.status === 'NO_APPROVER' || outcome.status === 'NO_RULE') result.skippedNoApprover += 1;
-      else result.failed += 1;
-    }
+    const fullOutcome = streamOutcome;
+    result.new += fullOutcome.new;
+    result.mailed += fullOutcome.mailed;
+    result.dryRunPrepared += fullOutcome.dryRunPrepared;
+    result.skippedAlreadySent += fullOutcome.skippedAlreadySent;
+    result.skippedAutoApprove += fullOutcome.skippedAutoApprove;
+    result.skippedNoApprover += fullOutcome.skippedNoApprover;
+    result.failed += fullOutcome.failed;
+    result.purchaseOrders.push(...fullOutcome.purchaseOrders);
 
     result.finishedAt = new Date().toISOString();
     if (!dryRun) {
-      if (windowTruncated) {
+      // Hold the watermark when the scan was truncated OR when the workflow
+      // checkpoint DB was unavailable (POs were skipped, not mailed). Holding
+      // makes the next tick re-read the same window so the skipped POs are
+      // retried once DB access is restored — nothing is lost.
+      if (result.truncated || runCap.capped || sharedWorkflowCheckUnavailable) {
         console.warn(
-          `[PoMailService] run ${runId}: watermark HELD — the CreationDate window was not fully read; ` +
-          'unread POs are retried on the next tick (no PO will be skipped).'
+          `[PoMailService] run ${runId}: watermark HELD — ` +
+          (result.truncated
+            ? 'the CreationDate window was not fully read'
+            : runCap.capped
+              ? `PO cap reached (${runCap.max} processed, POs remain)`
+              : 'workflow checkpoint DB was unavailable, POs skipped') +
+          '; unread/skipped POs are retried on the next tick (no PO will be skipped).'
         );
       } else {
         this.repository.setLastRunWatermark(startedAt);
@@ -235,6 +390,146 @@ class PoMailService {
     result.message = this._summarize(result);
     console.log(`[PoMailService] run ${runId}: ${result.message}`);
     return result;
+  }
+
+  /**
+   * Normalise, de-duplicate and mail a set of S/4 rows. Shared by the fast
+   * page-1 trigger and the full scan so dedup state carries across both passes.
+   *
+   * The `alreadySent` / `workflowTracked` Sets and the
+   * `workflowCheckUnavailable` flag are passed in and mutated, so a PO mailed
+   * by the fast pass is skipped by the full scan (and vice versa).
+   *
+   * @returns {Promise<{new, mailed, dryRunPrepared, skippedAlreadySent,
+   *   skippedAutoApprove, skippedNoApprover, failed, purchaseOrders,
+   *   workflowCheckUnavailable}>}
+   */
+  async _mailFromRows({
+    rows, routing, smtpConfig, runId, actor, dryRun, startedAt,
+    alreadySent, workflowTracked, workflowCheckUnavailable, force, runCap
+  }) {
+    const outcome = {
+      new: 0,
+      mailed: 0,
+      dryRunPrepared: 0,
+      skippedAlreadySent: 0,
+      skippedAutoApprove: 0,
+      skippedNoApprover: 0,
+      failed: 0,
+      purchaseOrders: [],
+      workflowCheckUnavailable,
+      capped: false,
+      remaining: 0
+    };
+
+    const purchaseOrders = this._groupAndNormalize(rows || []);
+
+    // De-duplicate against the mail log and the existing S/4 workflow
+    // checkpoint. The workflow table is also a persistent marker that the
+    // initial notification was sent, so a restart does not re-mail a recent
+    // multi-level PO when the optional mail-log entity is not deployed.
+    if (!force) {
+      const fresh = await this.repository.filterAlreadySent(
+        purchaseOrders.map((po) => ({ poNumber: po.poNumber, companyCode: po.companyCode }))
+      );
+      for (const key of fresh) alreadySent.add(key);
+
+      // Batch checkpoint lookup: one IN query for all POs in this batch
+      // instead of a per-PO get() loop (which caused thousands of DB
+      // round-trips per scan and exhausted the connection pool).
+      try {
+        const tracked = await this.workflowProgress.getMany(
+          purchaseOrders.map((po) => ({ poNumber: po.poNumber, companyCode: po.companyCode }))
+        );
+        for (const po of purchaseOrders) {
+          const key = `${po.companyCode}|${po.poNumber}`;
+          if (!po.poNumber || alreadySent.has(key)) continue;
+          if (tracked.has(key)) workflowTracked.add(key);
+        }
+      } catch (error) {
+        console.warn(
+          `[PoMailService] Persistent PO-mail duplicate check unavailable: ${error.message}`
+        );
+        workflowCheckUnavailable = true;
+        outcome.workflowCheckUnavailable = true;
+      }
+    }
+
+    // DB unavailable — SKIP this entire batch. The old behaviour was to keep
+    // attempting every PO ("sending without persistent duplicate protection"),
+    // but each attempt does a 3-retry DB write that fails, the PO is not
+    // marked tracked, and the same PO is re-tried on EVERY subsequent page.
+    // With ~2K POs × ~20 pages that is tens of thousands of failing DB
+    // writes + log lines per scan, exhausting memory and crashing the instance
+    // (exit 137) in a restart → full-walk → crash loop. Skipping is safe: no
+    // mail is sent, so no duplicate is possible, and the watermark is held in
+    // run() so every PO is retried on the next tick when DB access returns.
+    if (workflowCheckUnavailable && !dryRun && !force) {
+      console.warn(
+        `[PoMailService] run ${runId}: workflow checkpoint DB unavailable — ` +
+        `skipping ${purchaseOrders.length} PO(s) this tick to avoid a DB retry storm; ` +
+        'will retry on the next tick when DB access is restored (watermark held).'
+      );
+      return outcome;
+    }
+
+    const pending = purchaseOrders.filter((po) => {
+      if (!po.poNumber) return false;
+      const key = `${po.companyCode}|${po.poNumber}`;
+      if (alreadySent.has(key) || workflowTracked.has(key)) {
+        outcome.skippedAlreadySent += 1;
+        if (workflowTracked.has(key)) {
+          console.log(`[PoMailService] PO ${po.poNumber}: existing workflow checkpoint; skipping duplicate initial mail.`);
+        }
+        return false;
+      }
+      return true;
+    });
+    outcome.new = pending.length;
+
+    // Bound the work PER RUN (not per page): process at most runCap.max POs
+    // across the fast trigger AND every scan page combined. Each PO costs a
+    // secondary S/4 remarks API call, a full mail HTML build (up to 999 line
+    // items), a send, and 3 DB writes. Processing thousands of POs in ONE run
+    // piles up memory and DB load until the instance is OOM-killed (exit 137).
+    // runCap is shared across the fast pass and all pages, so the cap is global
+    // to this run. When the cap is hit the watermark is held in run() so the
+    // next tick processes the next batch — catch-up is resumable, nothing is
+    // skipped, and memory stays bounded to one small batch.
+    const cap = runCap || { processed: 0, max: this._maxPoPerRun(), capped: false };
+    const toProcess = [];
+    for (const po of pending) {
+      if (cap.processed >= cap.max) { cap.capped = true; break; }
+      cap.processed += 1;
+      toProcess.push(po);
+    }
+    outcome.remaining = Math.max(0, pending.length - toProcess.length);
+    outcome.capped = cap.capped;
+    if (outcome.capped) {
+      console.log(
+        `[PoMailService] run ${runId}: capped at ${cap.max} PO(s) this tick; ` +
+        `${outcome.remaining} PO(s) remain and will be processed on the next tick (watermark held).`
+      );
+    }
+
+    // Route + mail each pending PO. Failures are collected, never thrown.
+    for (const po of toProcess) {
+      const res = await this._processOne({ po, routing, smtpConfig, runId, actor, dryRun, startedAt });
+      outcome.purchaseOrders.push(res.entry);
+      if (res.status === 'SENT') outcome.mailed += 1;
+      else if (res.status === 'DRY_RUN') outcome.dryRunPrepared += 1;
+      else if (res.status === 'AUTO_APPROVED') outcome.skippedAutoApprove += 1;
+      else if (res.status === 'NO_APPROVER' || res.status === 'NO_RULE') outcome.skippedNoApprover += 1;
+      else outcome.failed += 1;
+    }
+
+    return outcome;
+  }
+
+  /** Max POs to process (mail + log + checkpoint) in a single run. */
+  _maxPoPerRun() {
+    const n = Number(process.env.PO_MAIL_MAX_PO_PER_RUN);
+    return Number.isFinite(n) && n > 0 ? n : 50;
   }
 
   /**
@@ -264,6 +559,19 @@ class PoMailService {
       routing: routing.describe(),
       log: this.repository.describe()
     };
+  }
+
+  /**
+   * Run ONLY the S/4 workflow poll — check approval progress for all active
+   * POs and send next-level/completion/rejection mails. Called independently
+   * by the scheduler on its own timer, so it never waits for the scan to
+   * finish. This is what makes next-level mails trigger within ~1-2 minutes
+   * after an approver acts in S/4, instead of waiting for the full scan.
+   */
+  async pollS4WorkflowProgress() {
+    const smtpConfig = await this.sender.config();
+    const routing = this.Routing.fromConfig(smtpConfig);
+    await this._pollS4WorkflowProgress({ routing, smtpConfig });
   }
 
   /* ── internals ──────────────────────────────────────────────────────── */
@@ -317,6 +625,21 @@ class PoMailService {
     }
     base.recipients = recipients;
 
+    // ── Atomically claim the Level 1 mail BEFORE sending ──────────────
+    // The checkpoint row is created with TRACKING_STATUS='SENDING'. Only the
+    // caller that wins this compare-and-set may send; if the row already
+    // exists another run already claimed (and sent) the creation mail. This
+    // closes the send-then-checkpoint gap that caused duplicate Level 1 mails.
+    const claimed = await this._claimInitialWorkflow({ po, rule, routing });
+    if (!claimed) {
+      base.status = 'SKIPPED_DUPLICATE';
+      console.log(
+        `[PoMailService] PO ${po.poNumber}: workflow checkpoint already claimed for the initial mail; skipping duplicate.`
+      );
+      await this._log({ base, po, actor, runId, dryRun });
+      return { status: base.status, entry: base };
+    }
+
     // Remarks come from the S/4HANA PurchaseOrderNote PlainLongText field.
     // Keep the legacy CDS header text as a fallback if the note is absent or
     // the secondary API request is unavailable.
@@ -365,8 +688,14 @@ class PoMailService {
       base.error = sendResult.error;
     }
 
+    // Finalize or release the atomic claim based on the send result.
+    // SENT → persist the checkpoint as ACTIVE/COMPLETE so the next scan and
+    //   poll see it as tracked.
+    // FAILED → delete the claimed row so the next scan retries the mail.
     if (base.status === 'SENT') {
-      await this._initializeS4WorkflowProgress({ po, rule, routing });
+      await this._finalizeInitialWorkflow({ po, rule, routing });
+    } else if (base.status === 'FAILED') {
+      await this._releaseInitialWorkflow({ po, rule, routing });
     }
 
     await this._log({ base, po, actor, runId, dryRun });
@@ -374,13 +703,20 @@ class PoMailService {
   }
 
   /**
-   * Save a persistent marker after the initial mail succeeds. The existing
-   * workflow table is used for both multi-level checkpoints and one-level
-   * sent-state protection; no additional CDS entity is required.
+   * Atomically claim the Level 1 (creation) mail for a PO.
+   *
+   * Calls `workflowProgress.claimInitial()` which INSERTs a checkpoint row
+   * with TRACKING_STATUS='SENDING'. Returns true when this caller won the
+   * claim (proceed to send); false when the row already exists (another run
+   * already claimed it — skip to prevent a duplicate).
+   *
+   * On any DB error the claim is treated as lost (skip): no mail is sent,
+   * which is safe because the 2-day rolling window keeps the PO in the next
+   * scan's page-1 results, so the mail will be retried automatically.
    */
-  async _initializeS4WorkflowProgress({ po, rule, routing }) {
+  async _claimInitialWorkflow({ po, rule, routing }) {
     const chain = routing.approvalChain(rule) || [];
-    if (!chain.length) return;
+    if (!chain.length) return true; // no approval chain → no checkpoint needed
 
     const hasCounter = po.workflowCompletedDialogTasks !== null
       && po.workflowCompletedDialogTasks !== undefined
@@ -397,7 +733,7 @@ class PoMailService {
     }
 
     try {
-      await this.workflowProgress.initialize({
+      return await this.workflowProgress.claimInitial({
         poNumber: po.poNumber,
         companyCode: po.companyCode,
         documentType: po.documentType,
@@ -406,7 +742,82 @@ class PoMailService {
         maxLevel: chain.length
       });
     } catch (error) {
-      console.error(`[PoMailService] Could not initialize workflow tracking for PO ${po.poNumber}: ${error.message}`);
+      console.error(
+        `[PoMailService] Could not claim initial workflow tracking for PO ${po.poNumber}: ${error.message}; ` +
+        'skipping send to avoid a possible duplicate (will retry on the next scan).'
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Finalize a successful Level 1 send: move the checkpoint from SENDING to
+   * ACTIVE (multi-level) or COMPLETE (one-level).
+   */
+  async _finalizeInitialWorkflow({ po, rule, routing }) {
+    const chain = routing.approvalChain(rule) || [];
+    if (!chain.length) return;
+    const trackingStatus = chain.length >= 2 ? 'ACTIVE' : 'COMPLETE';
+    const hasCounter = po.workflowCompletedDialogTasks !== null
+      && po.workflowCompletedDialogTasks !== undefined
+      && po.workflowCompletedDialogTasks !== ''
+      && Number.isFinite(Number(po.workflowCompletedDialogTasks));
+    const completedTasks = hasCounter ? Number(po.workflowCompletedDialogTasks) : 0;
+    try {
+      await this.workflowProgress.finalize({
+        poNumber: po.poNumber,
+        companyCode: po.companyCode,
+        targetTasks: completedTasks,
+        trackingStatus
+      });
+    } catch (error) {
+      console.error(
+        `[PoMailService] Could not finalize workflow tracking for PO ${po.poNumber}: ${error.message}. ` +
+        'The checkpoint row remains in SENDING and will be recovered at startup.'
+      );
+    }
+  }
+
+  /**
+   * Release a failed Level 1 claim: delete the row so the next scan retries
+   * the creation mail. No duplicate is possible because the SENDING marker
+   * blocked other callers during the attempt.
+   */
+  async _releaseInitialWorkflow({ po }) {
+    try {
+      await this.workflowProgress.releaseInitial({
+        poNumber: po.poNumber,
+        companyCode: po.companyCode
+      });
+    } catch (error) {
+      console.error(
+        `[PoMailService] Could not release initial workflow claim for PO ${po.poNumber}: ${error.message}. ` +
+        'The checkpoint row will be recovered at startup.'
+      );
+    }
+  }
+
+  /**
+   * Finalize a claim after a successful mail send, with clear error handling.
+   *
+   * If finalize() fails (e.g. DB disconnected after retries), the mail was
+   * already sent but the checkpoint didn't advance. The row stays in SENDING,
+   * which blocks duplicate re-sends. This is logged clearly so the user knows
+   * a manual intervention (forceResetSending) is needed if the mail was NOT
+   * actually delivered.
+   */
+  async _safeFinalize({ poNumber, companyCode, targetTasks, trackingStatus, mailDesc }) {
+    try {
+      await this.workflowProgress.finalize({
+        poNumber, companyCode, targetTasks, trackingStatus
+      });
+    } catch (error) {
+      console.error(
+        `[PoMailService] CRITICAL: ${mailDesc} for PO ${poNumber} was sent, but the checkpoint ` +
+        `could not be advanced after ${3} retries: ${error.message}. ` +
+        'The row is stuck in SENDING to block duplicate sends. ' +
+        'If the mail was NOT delivered, use forceResetSending to release the claim for retry.'
+      );
     }
   }
 
@@ -437,62 +848,74 @@ class PoMailService {
       console.warn(`[PoMailService] S/4 workflow polling skipped: ${error.message}`);
       return;
     }
+    if (!states || !states.length) return;
 
-    for (const state of states || []) {
+    // ── BATCH READ: fetch all active POs' workflow data in ONE S/4 call ──
+    // Previously the loop called getPurchaseOrders once per PO (N+1 calls),
+    // which added minutes when hundreds of POs were in workflow. Now we
+    // collect all PO numbers and make a single $filter request (eq/or chain —
+    // the service rejects the `in` operator).
+    const poNumbers = states
+      .map((s) => String(s.PO_NUMBER || '').trim())
+      .filter(Boolean);
+    if (!poNumbers.length) return;
+
+    console.log(`[PoMailService] S/4 workflow poll: ${poNumbers.length} active PO(s) — batch-reading.`);
+
+    let batchRows;
+    try {
+      batchRows = await this.client.getPurchaseOrdersBatch(poNumbers);
+    } catch (error) {
+      console.error(`[PoMailService] S/4 batch read failed: ${error.message}`);
+      return;
+    }
+
+    const rowMap = new Map();
+    for (const grouped of batchRows || []) {
+      const poNum = String(grouped?.PurchaseOrder || '');
+      if (!poNum) continue;
+      const row = (grouped.rows || []).find((entry) =>
+        Mapper.HEADER.completedWorkflowDialogTasks(entry) !== null
+        || Mapper.HEADER.purchasingProcessingStatus(entry)
+      ) || (grouped.rows || [])[0];
+      if (row) rowMap.set(poNum, row);
+    }
+
+    let statusMap = new Map();
+    if (typeof this.client.getPurchaseOrdersProcessingStatusBatch === 'function') {
+      try {
+        statusMap = await this.client.getPurchaseOrdersProcessingStatusBatch(poNumbers);
+      } catch (error) {
+        console.warn(
+          `[PoMailService] Batch processing-status read failed: ${error.message}. ` +
+          'Falling back to per-PO reads for this poll.'
+        );
+      }
+    }
+
+    for (const state of states) {
       const poNumber = String(state.PO_NUMBER || '');
       const companyCode = String(state.COMPANY_CODE || '');
-      try {
-        const fetched = await this.client.getPurchaseOrders({
-          purchaseOrder: poNumber,
-          companyCode,
-          documentType: state.DOCUMENT_TYPE || ''
-        });
-        const row = (fetched.rows || []).find((entry) =>
-          Mapper.HEADER.completedWorkflowDialogTasks(entry) !== null
-          || Mapper.HEADER.purchasingProcessingStatus(entry)
-        );
-        if (!row) continue;
+      const row = rowMap.get(poNumber);
+      if (!row) continue;
 
-        // Prefer the standard S/4 PO API status on every poll. The custom
-        // YY1 view may report a completed-looking value after a My Inbox
-        // rejection; trusting that value could incorrectly send the next level.
-        // If the authoritative API read fails/returns blank, fail closed rather
-        // than using a possibly stale view status to advance the workflow.
-        let statusRow = row;
-        let status = '';
-        if (typeof this.client.getPurchaseOrderProcessingStatus === 'function') {
-          // Do not fall back to a possibly stale custom-view status when the
-          // authoritative API is available but its read fails or is blank.
-          statusRow = { ...row };
-          for (const field of new Set([
-            Constants.PROCESSING_STATUS_FIELD,
-            'PurchasingProcessingStatus',
-            'PurchaseOrderProcessingStatus',
-            'PurchasingDocumentProcessingStatus',
-            'PROCSTAT',
-            'PO_PROCESSING_STATUS'
-          ])) statusRow[field] = '';
-          try {
-            status = String(await this.client.getPurchaseOrderProcessingStatus(poNumber) || '').trim();
-            if (status) {
-              statusRow = { ...row, [Constants.PROCESSING_STATUS_FIELD]: status };
-            } else {
-              console.warn(`[PoMailService] Standard PO API returned no processing status for PO ${poNumber}.`);
-            }
-          } catch (error) {
-            console.warn(
-              `[PoMailService] Could not read authoritative processing status for PO ${poNumber}: ${error.message}`
-            );
-          }
+      try {
+      let statusRow = row;
+      let status = '';
+      if (typeof this.client.getPurchaseOrdersProcessingStatusBatch === 'function') {
+        status = statusMap.get(poNumber) || '';
+        if (status) {
+          statusRow = { ...row, [Constants.PROCESSING_STATUS_FIELD]: status };
         } else {
-          // Compatibility path for test clients or integrations without the
-          // standard PO API method; the production S4PoClient provides it.
-          status = Mapper.HEADER.purchasingProcessingStatus(row);
+          console.warn(`[PoMailService] Standard PO API returned no processing status for PO ${poNumber}.`);
         }
-        const completedTasks = Mapper.HEADER.completedWorkflowDialogTasks(row);
-        const activeTasks = Mapper.HEADER.activeWorkflowDialogTasks(row);
-        const lastCompletedTasks = Number(state.LAST_COMPLETED_TASKS || 0);
-        console.log(
+      } else {
+        status = Mapper.HEADER.purchasingProcessingStatus(row);
+      }
+      const completedTasks = Mapper.HEADER.completedWorkflowDialogTasks(row);
+      const activeTasks = Mapper.HEADER.activeWorkflowDialogTasks(row);
+      const lastCompletedTasks = Number(state.LAST_COMPLETED_TASKS || 0);
+      console.log(
           `[PoMailService] PO ${poNumber} workflow poll: status='${status || 'UNKNOWN'}', ` +
           `completedTasks=${completedTasks ?? 'UNKNOWN'}, activeTasks=${activeTasks ?? 'UNKNOWN'}, ` +
           `checkpointTasks=${lastCompletedTasks}.`
@@ -539,18 +962,32 @@ class PoMailService {
               `the ${chain.length}-level route and active-task count is 0; treating workflow as rejected.`
             );
           }
+          // Atomically claim the rejection notice before sending.
+          const rejectionClaim = await this.workflowProgress.claim({
+            poNumber, companyCode, expectedTasks: lastCompletedTasks
+          });
+          if (!rejectionClaim) {
+            console.log(
+              `[PoMailService] PO ${poNumber}: rejection notice already claimed by another poll; skipping duplicate.`
+            );
+            continue;
+          }
           const rejection = await this._sendRejectionMail({
             poNumber, companyCode, documentType, rule, chain, rejectedLevel, smtpConfig
           });
           if (!rejection.ok) {
             console.error(`[PoMailService] Rejection notice for PO ${poNumber} failed: ${rejection.error}`);
-            continue; // Leave ACTIVE so the next poll retries delivery.
+            await this.workflowProgress.release({
+              poNumber, companyCode, expectedTasks: lastCompletedTasks
+            });
+            continue; // Release claim so the next poll retries delivery.
           }
-          await this.workflowProgress.advance({
+          await this._safeFinalize({
             poNumber,
             companyCode,
-            completedTasks: completedTasks === null ? lastCompletedTasks : completedTasks,
-            trackingStatus: 'REJECTED'
+            targetTasks: completedTasks === null ? lastCompletedTasks : completedTasks,
+            trackingStatus: 'REJECTED',
+            mailDesc: 'Rejection notice'
           });
           console.log(
             `[PoMailService] PO ${poNumber} rejected in S/4HANA; notified ` +
@@ -605,6 +1042,16 @@ class PoMailService {
               );
               break;
             }
+            // Atomically claim the completion notice before sending.
+            const completionClaim = await this.workflowProgress.claim({
+              poNumber, companyCode, expectedTasks: observedCompleted
+            });
+            if (!completionClaim) {
+              console.log(
+                `[PoMailService] PO ${poNumber}: completion notice already claimed by another poll; skipping duplicate.`
+              );
+              break;
+            }
             const completion = await this._sendCompletionMail({
               poNumber,
               companyCode,
@@ -615,15 +1062,19 @@ class PoMailService {
             });
             if (!completion.ok) {
               console.error(`[PoMailService] Completion notification for PO ${poNumber} failed: ${completion.error}`);
+              await this.workflowProgress.release({
+                poNumber, companyCode, expectedTasks: observedCompleted
+              });
               retryThisPo = true;
-              break; // Keep the previous checkpoint so the next poll can retry.
+              break; // Release claim so the next poll retries; checkpoint stays at previous value.
             }
 
-            await this.workflowProgress.advance({
+            await this._safeFinalize({
               poNumber,
               companyCode,
-              completedTasks,
-              trackingStatus: 'COMPLETE'
+              targetTasks: completedTasks,
+              trackingStatus: 'COMPLETE',
+              mailDesc: 'Completion notice'
             });
             console.log(
               `[PoMailService] S/4 workflow completed for PO ${poNumber}; sent completion notice to ` +
@@ -653,6 +1104,16 @@ class PoMailService {
             }
           }
 
+          // Atomically claim this level's mail before sending.
+          const levelClaim = await this.workflowProgress.claim({
+            poNumber, companyCode, expectedTasks: observedCompleted
+          });
+          if (!levelClaim) {
+            console.log(
+              `[PoMailService] PO ${poNumber}: Level ${nextLevel} notification already claimed by another poll; skipping duplicate.`
+            );
+            break;
+          }
           const sent = await this._sendLevelMail({
             poNumber,
             companyCode,
@@ -665,15 +1126,19 @@ class PoMailService {
           });
           if (!sent.ok) {
             console.error(`[PoMailService] Level ${nextLevel} notification for PO ${poNumber} failed: ${sent.error}`);
+            await this.workflowProgress.release({
+              poNumber, companyCode, expectedTasks: observedCompleted
+            });
             retryThisPo = true;
-            break; // Keep this stage's checkpoint so the next poll retries it.
+            break; // Release claim so the next poll retries this stage.
           }
 
-          await this.workflowProgress.advance({
+          await this._safeFinalize({
             poNumber,
             companyCode,
-            completedTasks: observedCompleted,
-            trackingStatus: 'ACTIVE'
+            targetTasks: observedCompleted,
+            trackingStatus: 'ACTIVE',
+            mailDesc: `Level ${nextLevel} notice`
           });
           console.log(
             `[PoMailService] S/4 completed-task count for PO ${poNumber} is ${observedCompleted}; ` +

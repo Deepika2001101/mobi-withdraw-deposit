@@ -127,6 +127,12 @@ class SftpService {
     });
   }
 
+  async exists(remotePath) {
+    return this._withRetry(`exists ${remotePath}`, (client) =>
+      client.exists(this._resolvePath(remotePath))
+    );
+  }
+
   isTransientError(error) { return this._isRetryable(error); }
 
   async _ensureDir(client, directory) {

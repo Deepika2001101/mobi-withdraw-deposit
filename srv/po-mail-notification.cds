@@ -119,6 +119,15 @@ service PoMailNotificationService {
   ) returns PoMailRunResult;
 
   /**
+   * Checks approval progress for all active POs and sends next-level /
+   * completion / rejection mails. Called independently by PoAutoScheduler
+   * on its own timer (every PO_MAIL_POLL_INTERVAL_MIN min, default 1 min),
+   * so next-level mails trigger within ~1-2 minutes of an approver acting
+   * in S/4, without waiting for the full scan to finish.
+   */
+  action pollS4WorkflowProgress() returns PoMailRunResult;
+
+  /**
    * Mails ONE purchase order from a header payload the caller already holds -
    * the hook to use when the PO is created inside this CAP application.
    *
