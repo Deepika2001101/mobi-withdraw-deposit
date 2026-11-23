@@ -47,7 +47,7 @@ class S4PoClient {
    *   safety ceiling reached) — the caller must hold the run watermark so
    *   unread POs are retried on the next tick instead of being skipped.
    */
-  async getPurchaseOrders({ fromDate, toDate, purchaseOrder = '', companyCode = '', documentType = '', firstPageOnly = false } = {}) {
+  async getPurchaseOrders({ fromDate, toDate, purchaseOrder = '', companyCode = '', documentType = '' } = {}) {
     const destination = await this._getDestination();
 
     if (purchaseOrder) {
@@ -57,7 +57,7 @@ class S4PoClient {
 
     const range = this._buildRange(fromDate, toDate);
     try {
-      const rows = await this._fetchAll(destination, range, companyCode, documentType, true, firstPageOnly);
+      const rows = await this._fetchAll(destination, range, companyCode, documentType, true);
       return { rows, range, degraded: false, truncated: Boolean(this.lastFetchTruncated) };
     } catch (error) {
       // A CDS view that does not expose CreationDate (or a differently named
@@ -68,106 +68,9 @@ class S4PoClient {
         `[S4PoClient] Filtered query failed (${error.message}). ` +
         `Retrying without the date filter, relying on duplicate-send protection.`
       );
-      const rows = await this._fetchAll(destination, range, companyCode, documentType, false, firstPageOnly);
+      const rows = await this._fetchAll(destination, range, companyCode, documentType, false);
       return { rows, range, degraded: true, truncated: Boolean(this.lastFetchTruncated) };
     }
-  }
-
-  /**
-   * Stream purchase orders page-by-page, processing each page via a callback
-   * and discarding rows before reading the next page. Keeps memory bounded to
-   * one page instead of accumulating all rows (which caused OOM kills when
-   * reading 79+ pages / 78K+ rows).
-   *
-   * @param {Function} pageProcessor  async (pageRows, pageNumber) => void
-   * @returns {Promise<{range:object, degraded:boolean, truncated:boolean}>}
-   */
-  async getPurchaseOrdersPaged({ fromDate, toDate, companyCode = '', documentType = '', pageProcessor } = {}) {
-    const destination = await this._getDestination();
-    const range = this._buildRange(fromDate, toDate);
-    try {
-      await this._fetchAll(destination, range, companyCode, documentType, true, false, pageProcessor);
-      return { range, degraded: false, truncated: Boolean(this.lastFetchTruncated) };
-    } catch (error) {
-      console.warn(
-        `[S4PoClient] Filtered streaming query failed (${error.message}). ` +
-        `Retrying without the date filter, relying on duplicate-send protection.`
-      );
-      await this._fetchAll(destination, range, companyCode, documentType, false, false, pageProcessor);
-      return { range, degraded: true, truncated: Boolean(this.lastFetchTruncated) };
-    }
-  }
-
-  /**
-   * Batch-read workflow status for multiple POs in ONE OData call instead of
-   * one call per PO. The poll previously called getPurchaseOrders once per
-   * active PO (N+1 calls), which added minutes when hundreds of POs were in
-   * workflow. This reads all requested POs in a single $filter request
-   * (eq/or chain — the service rejects the `in` operator), grouped by PO
-   * number downstream.
-   *
-   * @param {string[]} poNumbers  array of PO numbers to fetch
-   * @returns {Promise<Array>} flat rows grouped by PO number
-   */
-  async getPurchaseOrdersBatch(poNumbers, { companyCode = '', documentType = '' } = {}) {
-    const numbers = (Array.isArray(poNumbers) ? poNumbers : [])
-      .filter(Boolean)
-      .map(String);
-    if (!numbers.length) return [];
-
-    const destination = await this._getDestination();
-    // The tenant's OData service raises SYSTEM_NO_ROLL (HTTP 500) when the
-    // eq/or $filter chain is too long, so read in small chunks instead of
-    // one request for every active PO. Each chunk keeps the filter tiny; a
-    // chunk that still fails falls back to per-PO reads.
-    const BATCH_CHUNK = 5;
-    const grouped = [];
-    for (let i = 0; i < numbers.length; i += BATCH_CHUNK) {
-      const chunk = numbers.slice(i, i + BATCH_CHUNK);
-      let rows = [];
-      try {
-        const url = this._buildBatchUrl(destination.url, chunk, companyCode, documentType);
-        const payload = await this._getJson(url, destination);
-        rows = this._extractRows(payload);
-      } catch (error) {
-        console.warn(
-          `[S4PoClient] Batch read chunk of ${chunk.length} PO(s) failed (${error.message}); ` +
-          'falling back to per-PO reads for this chunk.'
-        );
-        for (const poNumber of chunk) {
-          try {
-            const single = await this.getPurchaseOrders({ purchaseOrder: poNumber, companyCode, documentType });
-            rows.push(...(single.rows || []));
-          } catch (singleError) {
-            console.warn(
-              `[S4PoClient] Per-PO fallback read failed for PO ${poNumber}: ${singleError.message}`
-            );
-          }
-        }
-      }
-      grouped.push(...this._groupByPoNumber(rows));
-    }
-    return grouped;
-  }
-
-  _buildBatchUrl(destinationUrl, poNumbers, companyCode, documentType) {
-    const url = new URL(this._baseUrl(destinationUrl));
-    // The YY1_PO_EMAIL_CDS service rejects the `in (...)` operator in $filter
-    // ("Invalid token detected"), so build an explicit eq/or chain. The chain
-    // is parenthesised so the optional CompanyCode/PurchaseOrderType `and`
-    // filters bind to ALL clauses, not just the last one.
-    const orClauses = poNumbers.map((n) => `PurchaseOrder eq '${this._escape(n)}'`);
-    const filter = `(${orClauses.join(' or ')})`;
-    if (companyCode) filter += ` and CompanyCode eq '${this._escape(companyCode)}'`;
-    if (documentType) filter += ` and PurchaseOrderType eq '${this._escape(documentType)}'`;
-    const params = { $format: 'json', $filter: filter };
-    // No $expand: the poll only needs header fields (workflow counters,
-    // status), not line items. Skipping $expand keeps the response small
-    // and fast, even for POs with 999 line items.
-    const sortDateField = Constants.CREATED_ON_FIELD;
-    params.$orderby = `${sortDateField} desc,PurchaseOrder desc`;
-    url.search = new URLSearchParams(params).toString();
-    return url.toString();
   }
 
   /**
@@ -200,66 +103,6 @@ class S4PoClient {
     const rows = result.rows;
     if (!rows.length) throw new Error(`Purchase order ${purchaseOrder} not found on ${this.destinationName}`);
     return rows[0];
-  }
-
-  /**
-   * Batch-read authoritative processing status for multiple POs in ONE call
-   * to the standard PO API (API_PURCHASEORDER_2). Returns a Map of
-   * poNumber -> status string. Replaces the per-PO getPurchaseOrderProcessingStatus
-   * calls that added N sequential API round-trips to the poll.
-   */
-  async getPurchaseOrdersProcessingStatusBatch(poNumbers) {
-    const numbers = (Array.isArray(poNumbers) ? poNumbers : [])
-      .filter(Boolean)
-      .map(String);
-    const result = new Map();
-    if (!numbers.length) return result;
-
-    const destination = await this._getDestination();
-    const escape = (value) => String(value ?? '').replace(/'/g, "''");
-    // Chunk like getPurchaseOrdersBatch: long eq/or chains raise
-    // SYSTEM_NO_ROLL (HTTP 500) on this tenant. A failing chunk falls back
-    // to per-PO reads.
-    const BATCH_CHUNK = 5;
-    for (let i = 0; i < numbers.length; i += BATCH_CHUNK) {
-      const chunk = numbers.slice(i, i + BATCH_CHUNK);
-      let rows = [];
-      try {
-        const url = new URL(this._baseUrl(destination.url, Constants.PURCHASE_ORDER_API_PATH));
-        const orClauses = chunk.map((n) => `PurchaseOrder eq '${escape(n)}'`);
-        url.searchParams.set('$select', `PurchaseOrder,${Constants.PROCESSING_STATUS_FIELD}`);
-        url.searchParams.set('$filter', orClauses.join(' or '));
-        url.searchParams.set('$format', 'json');
-        url.searchParams.set('$top', String(chunk.length));
-        const payload = await this._getJson(url.toString(), destination);
-        rows = this._extractRows(payload);
-      } catch (error) {
-        console.warn(
-          `[S4PoClient] Batch status chunk of ${chunk.length} PO(s) failed (${error.message}); ` +
-          'falling back to per-PO reads for this chunk.'
-        );
-        for (const poNumber of chunk) {
-          try {
-            const status = await this.getPurchaseOrderProcessingStatus(poNumber);
-            if (status) result.set(poNumber, String(status).trim());
-          } catch (singleError) {
-            console.warn(
-              `[S4PoClient] Per-PO status fallback failed for PO ${poNumber}: ${singleError.message}`
-            );
-          }
-        }
-        continue;
-      }
-      for (const row of rows) {
-        const poNum = String(row?.PurchaseOrder || '');
-        if (!poNum) continue;
-        const status = row?.[Constants.PROCESSING_STATUS_FIELD]
-          ?? row?.PurchasingProcessingStatus
-          ?? '';
-        result.set(poNum, String(status).trim());
-      }
-    }
-    return result;
   }
 
   /**
@@ -543,18 +386,13 @@ class S4PoClient {
 
   /* ── paging ─────────────────────────────────────────────────────────── */
 
-  async _fetchAll(destination, range, companyCode, documentType, withDate, firstPageOnly = false, pageProcessor = null) {
+  async _fetchAll(destination, range, companyCode, documentType, withDate) {
     const rows = [];
     let skipToken = '';
     let skip = null;
     let page = 0;
     let prevPageKey = '';
     let exhausted = false;
-    // Rows processed so far — counts rows in BOTH modes. In stream mode the
-    // `rows` array stays empty (rows are passed to the processor and
-    // discarded), so the $skip offset MUST come from this counter, not from
-    // rows.length (which would always be 0 and repeat page 1 forever).
-    let processedRows = 0;
     this.lastFetchTruncated = false;
 
     while (page < this.maxPages) {
@@ -577,23 +415,14 @@ class S4PoClient {
           rows.length = 0;
           rows.push(...expandedRows);
           prevPageKey = expandedRows.length ? JSON.stringify(expandedRows) : '';
-          // Fast-trigger read: page 1 (with $expand) is all we need to mail
-          // the newest POs immediately. Stop here — intentionally not
-          // truncated, since the caller asked for page 1 only.
-          if (firstPageOnly) { exhausted = true; break; }
-          // Stream mode: pass page 1 rows to the processor and discard.
-          if (pageProcessor) { await pageProcessor(expandedRows, page); }
-          processedRows += expandedRows.length;
           const expandedNext = this._extractNextPage(expandedPayload);
           if ((!expandedNext || !expandedNext.kind) && expandedRows.length < this.pageSize) break;
           if (expandedNext?.kind === 'token') { skipToken = expandedNext.value; skip = null; }
           else if (expandedNext?.kind === 'skip') { skip = expandedNext.value; skipToken = ''; }
-          else { skip = processedRows; skipToken = ''; } // full page, no usable link -> offset paging
+          else { skip = rows.length; skipToken = ''; } // full page, no usable link -> offset paging
           page += 1;
           continue;
         }
-        // Fast-trigger read: page 1 (no expand needed) is all we need.
-        if (firstPageOnly) { exhausted = true; break; }
       }
 
       // Offset-fallback paging: before ACCEPTING a page, make sure the service
@@ -612,20 +441,7 @@ class S4PoClient {
       }
       prevPageKey = pageKey;
 
-      // Stream mode: pass rows to the processor and discard immediately,
-      // keeping memory bounded to one page. Otherwise accumulate as before.
-      // processedRows tracks every row seen so far — the $skip offset for the
-      // no-next-link fallback below. If the processor returns true, it has
-      // hit its work cap and asks us to stop reading further pages.
-      if (pageProcessor) {
-        processedRows += pageRows.length;
-        const stop = await pageProcessor(pageRows, page);
-        if (stop) { exhausted = true; break; }
-      } else {
-        rows.push(...pageRows);
-        processedRows += pageRows.length;
-      }
-
+      rows.push(...pageRows);
       if (pageRows.length === 0) { exhausted = true; break; }
 
       // A service that hands back a next-page link uses it (token or offset).
@@ -643,7 +459,7 @@ class S4PoClient {
       // No next link at all: some views omit it even though more rows exist.
       // Continue with $skip offset paging while pages keep coming back full.
       if (pageRows.length >= this.pageSize) {
-        const offset = processedRows;
+        const offset = rows.length;
         console.log(`[S4PoClient] Page ${page}: full page with no next link — continuing with $skip=${offset}.`);
         skip = offset;
         skipToken = '';
@@ -657,13 +473,13 @@ class S4PoClient {
     this.lastFetchTruncated = truncated;
     if (truncated) {
       console.warn(
-        `[S4PoClient] CreationDate window NOT fully read: stopped at ${page} page(s) / ${processedRows} row(s) ` +
+        `[S4PoClient] CreationDate window NOT fully read: stopped at ${page} page(s) / ${rows.length} row(s) ` +
         `(PO_MAIL_MAX_PAGES=${this.maxPages}). Unread POs stay in the window — this run will hold the ` +
         'watermark and retry them next tick (no PO is skipped). Fixing the YY1_PO_EMAIL view fan-out ' +
         'makes this ceiling unreachable.'
       );
     }
-    console.log(`[S4PoClient] Read ${processedRows} purchase order row(s) in ${page} page(s) from ${this.destinationName}${truncated ? ' — TRUNCATED' : ''}.`);
+    console.log(`[S4PoClient] Read ${rows.length} purchase order row(s) in ${page} page(s) from ${this.destinationName}${truncated ? ' — TRUNCATED' : ''}.`);
     return rows;
   }
 
@@ -675,23 +491,6 @@ class S4PoClient {
     if (payload.d && typeof payload.d === 'object') return [payload.d];   // V2 single entity
     if (payload.value && typeof payload.value === 'object') return [payload.value];
     return [];
-  }
-
-  /**
-   * Group flat PO rows (one row per item) by PO number.
-   * Returns an array of grouped PO objects, each with a `rows` array
-   * containing all its item rows. Used by the batch poll to map S/4
-   * responses back to individual POs.
-   */
-  _groupByPoNumber(rows) {
-    const map = new Map();
-    for (const row of rows) {
-      const poNum = row.PurchaseOrder || row.PurchaseOrderNumber || row.poNumber;
-      if (!poNum) continue;
-      if (!map.has(poNum)) map.set(poNum, { PurchaseOrder: poNum, rows: [] });
-      map.get(poNum).rows.push(row);
-    }
-    return Array.from(map.values());
   }
 
   /**
